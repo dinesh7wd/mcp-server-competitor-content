@@ -1,0 +1,30 @@
+# mcp-server-competitor-content
+
+Cursor agent rules. Follow on every change.
+
+## Scope
+- Work only inside this repository.
+- Layer order: infrastructure → engines → services → tools → server.
+
+## Architecture
+- All HTML fetch/parse via ContentFetcher. No fetch/cheerio in engines/services.
+- NLP engines are pure: content in → structured result out. No HTTP.
+- Never scrape Google SERPs directly — use serpProvider only.
+- Headless (Playwright) only after thin static content; never default path.
+- Cache robots.txt rulesets by domain (ROBOTS_CACHE_TTL_SECONDS).
+- Default clustering: TF-IDF + cosine. Embeddings only if EMBEDDING_PROVIDER set.
+- Services never import @modelcontextprotocol/sdk.
+
+## TypeScript
+- Strict: noImplicitAny, strictNullChecks, exactOptionalPropertyTypes.
+- Explicit return types; never any; prefer readonly.
+- Functions under 40 lines; one tool per file.
+
+## Errors
+- McpError with codes: InvalidParams, SCRAPE_FAIL, PARSE_ERROR, ROBOTS_DISALLOWED,
+  RATE_LIMITED, NO_CONTENT, SERP_PROVIDER_UNCONFIGURED, HEADLESS_RENDER_FAIL, SSRF_BLOCKED.
+- Zod validate inputs. No stack leaks to clients.
+
+## Testing
+- Mock all HTTP, SERP, and headless. Use fixtures including thin SPA HTML.
+- ≥80% branch coverage engines + services.
