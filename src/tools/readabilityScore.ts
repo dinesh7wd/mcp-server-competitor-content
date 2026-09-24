@@ -6,6 +6,12 @@ export const readabilityScoreTool: ToolDefinition<typeof readabilityInputSchema>
   title: "Readability score",
   description: "Flesch-Kincaid, SMOG, and Coleman-Liau readability metrics for a URL or raw text.",
   schema: readabilityInputSchema,
+  annotations: {
+    readOnlyHint: true,
+    openWorldHint: true,
+    destructiveHint: false,
+    idempotentHint: true,
+  },
   handler: (raw, services, config) =>
     runTool(readabilityInputSchema, raw, services, config, (input) => services.readability(input)),
 };

@@ -20,7 +20,9 @@ export interface InfraOverrides {
 
 export function createAppServices(config: AppConfig, overrides: InfraOverrides = {}): AppServices {
   const cache = overrides.cache ?? new LruCache(256, config.cacheTtlSeconds);
-  const http = overrides.http ?? createHttpClient();
+  const http =
+    overrides.http ??
+    createHttpClient({ timeoutMs: config.httpTimeoutMs, retries: config.httpRetries });
   const robots = createRobotsChecker(http, config, cache);
   const rateLimiter = createDomainRateLimiter(config.rateLimitDelayMs);
   const headless = overrides.headless ?? createHeadlessRenderer(config);
@@ -34,7 +36,7 @@ export function createAppServices(config: AppConfig, overrides: InfraOverrides =
 export function createServer(config: AppConfig, overrides: InfraOverrides = {}): McpServer {
   const server = new McpServer({
     name: "mcp-server-competitor-content",
-    version: "1.0.0",
+    version: "1.1.0",
   });
   registerTools(server, createAppServices(config, overrides), config);
   return server;

@@ -1,6 +1,6 @@
 {
   "name": "mcp-server-competitor-content",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "MCP server for competitor content analysis, keyword gaps, content scoring, and SERP intelligence",
   "type": "module",
   "main": "dist/index.js",

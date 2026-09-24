@@ -1,4 +1,4 @@
-import { tfidfVector } from "./keywordEngine.js";
+import { buildIdf, tfidfVector, tfidfVectorWithIdf } from "./keywordEngine.js";
 
 export function cosineSimilarity(a: Map<string, number>, b: Map<string, number>): number {
   let dot = 0;
@@ -15,7 +15,8 @@ export function cosineSimilarity(a: Map<string, number>, b: Map<string, number>)
 }
 
 export function similarityFromTexts(a: string, b: string): number {
-  return cosineSimilarity(tfidfVector(a), tfidfVector(b));
+  const idf = buildIdf([a, b]);
+  return cosineSimilarity(tfidfVectorWithIdf(a, idf), tfidfVectorWithIdf(b, idf));
 }
 
 export interface ClusterAssignment {
@@ -23,13 +24,42 @@ export interface ClusterAssignment {
   readonly memberIndexes: readonly number[];
 }
 
-/** Simple k-means on TF-IDF bag vectors (deterministic seed via first-k init). */
-export function clusterTexts(texts: readonly string[], k: number): readonly ClusterAssignment[] {
-  const vectors = texts.map((t) => tfidfVector(t));
+/**
+ * K-means on TF-IDF bag vectors.
+ * Centroids seeded by farthest-first (not first-k) for order-independence of init quality.
+ */
+export function clusterTexts(
+  texts: readonly string[],
+  k: number,
+  idf?: Map<string, number>,
+): readonly ClusterAssignment[] {
+  const corpusIdf = idf ?? buildIdf(texts);
+  const vectors = texts.map((t) => tfidfVectorWithIdf(t, corpusIdf));
   const n = vectors.length;
   if (n === 0) return [];
   const kk = Math.min(k, n);
-  const centroids = vectors.slice(0, kk).map((v) => new Map(v));
+
+  // Farthest-first traversal for deterministic, order-robust seeds
+  const seedIdx: number[] = [0];
+  while (seedIdx.length < kk) {
+    let bestI = 0;
+    let bestDist = -1;
+    for (let i = 0; i < n; i += 1) {
+      if (seedIdx.includes(i)) continue;
+      let minSim = Infinity;
+      for (const s of seedIdx) {
+        minSim = Math.min(minSim, cosineSimilarity(vectors[i]!, vectors[s]!));
+      }
+      const dist = 1 - (minSim === Infinity ? 0 : minSim);
+      if (dist > bestDist) {
+        bestDist = dist;
+        bestI = i;
+      }
+    }
+    seedIdx.push(bestI);
+  }
+
+  const centroids = seedIdx.map((i) => new Map(vectors[i]!));
   let assignment = new Array<number>(n).fill(0);
 
   for (let iter = 0; iter < 20; iter += 1) {
@@ -70,3 +100,6 @@ export function clusterTexts(texts: readonly string[], k: number): readonly Clus
   }
   return clusters;
 }
+
+// Keep tfidfVector export path for engines that still import via similarity
+export { tfidfVector };

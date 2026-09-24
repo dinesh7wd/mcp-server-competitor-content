@@ -1,5 +1,7 @@
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
+import { redactExtra } from "./redact.js";
+
 const RANK: Record<LogLevel, number> = { debug: 10, info: 20, warn: 30, error: 40 };
 let minLevel: LogLevel = "info";
 
@@ -9,10 +11,11 @@ export function setLogLevel(level: LogLevel): void {
 
 function write(level: LogLevel, message: string, extra?: Readonly<Record<string, unknown>>): void {
   if (RANK[level] < RANK[minLevel]) return;
+  const safeExtra = extra === undefined ? undefined : redactExtra(extra);
   const payload =
-    extra === undefined
+    safeExtra === undefined
       ? { ts: new Date().toISOString(), level, message }
-      : { ts: new Date().toISOString(), level, message, ...extra };
+      : { ts: new Date().toISOString(), level, message, ...safeExtra };
   process.stderr.write(`${JSON.stringify(payload)}\n`);
 }
 

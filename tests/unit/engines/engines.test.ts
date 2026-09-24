@@ -33,6 +33,7 @@ function pageFromHtml(html: string): ScrapedPage {
     externalLinks: 0,
     images: $("img").length,
     hasSchema: true,
+    schemaTypes: ["Article"],
     brandMentions: ["amazon"],
     outboundHosts: [],
     usedHeadless: false,

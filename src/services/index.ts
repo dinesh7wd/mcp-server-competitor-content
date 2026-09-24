@@ -1,10 +1,11 @@
 import type { ContentFetcher, ScrapedPage } from "../infrastructure/contentFetcher.js";
+import { toScrapeToolResult } from "../infrastructure/contentFetcher.js";
 import type { SerpProvider } from "../infrastructure/serpProvider.js";
-import { extractKeywords } from "../engines/keywordEngine.js";
+import { extractKeywords, buildIdf, tfidfVectorWithIdf } from "../engines/keywordEngine.js";
 import { diffHeadings, multiHeadingCompare } from "../engines/headingDiffEngine.js";
 import { scoreReadability } from "../engines/readabilityEngine.js";
 import { scoreQuality } from "../engines/qualityEngine.js";
-import { clusterTexts, similarityFromTexts } from "../engines/similarityEngine.js";
+import { clusterTexts, cosineSimilarity, similarityFromTexts } from "../engines/similarityEngine.js";
 import { toCleanContent } from "../engines/scraperEngine.js";
 import { toMcpError } from "../utils/errors.js";
 import type {
@@ -19,7 +20,7 @@ import type {
 } from "../utils/schemas.js";
 
 export interface AppServices {
-  scrape(input: ScrapePageInput): Promise<ScrapedPage>;
+  scrape(input: ScrapePageInput): Promise<unknown>;
   keywords(input: ExtractKeywordsInput): Promise<unknown>;
   gap(input: ContentGapInput): Promise<unknown>;
   headings(input: CompareHeadingsInput): Promise<unknown>;
@@ -40,11 +41,31 @@ async function resolveText(
   return { text: page.bodyText, page };
 }
 
+async function fetchOne(
+  fetcher: ContentFetcher,
+  url: string,
+): Promise<{ ok: true; page: ScrapedPage } | { ok: false; url: string; error: string }> {
+  try {
+    const page = await fetcher.fetchPage(url);
+    return { ok: true, page };
+  } catch (e) {
+    const err = toMcpError(e);
+    return { ok: false, url, error: `${err.code}: ${err.message}` };
+  }
+}
+
+/** Gap: term must appear in competitor top-K with score above threshold and not in yours. */
+const GAP_MIN_SCORE = 0.5;
+const GAP_MIN_COMPETITOR_HITS = 1;
+
 export function createServices(fetcher: ContentFetcher, serp: SerpProvider): AppServices {
   return {
-    async scrape(input): Promise<ScrapedPage> {
+    async scrape(input) {
       try {
-        return await fetcher.fetchPage(input.url, { forceHeadless: input.forceHeadless });
+        const page = await fetcher.fetchPage(input.url, {
+          forceHeadless: input.forceHeadless,
+        });
+        return toScrapeToolResult(page);
       } catch (e) {
         throw toMcpError(e);
       }
@@ -61,24 +82,59 @@ export function createServices(fetcher: ContentFetcher, serp: SerpProvider): App
       try {
         let yourText: string;
         let yourHeadings: { level: number; text: string }[] = [];
+        const errors: { url: string; error: string }[] = [];
+
         if (input.yourContent.type === "url") {
-          const page = await fetcher.fetchPage(input.yourContent.value);
-          yourText = page.bodyText;
-          yourHeadings = [...page.headings];
+          const yours = await fetchOne(fetcher, input.yourContent.value);
+          if (!yours.ok) {
+            return {
+              yourKeywordCount: 0,
+              gaps: [],
+              competitors: [],
+              errors: [{ url: yours.url, error: yours.error }],
+            };
+          }
+          yourText = yours.page.bodyText;
+          yourHeadings = [...yours.page.headings];
         } else {
           yourText = input.yourContent.value;
         }
-        const yourKw = new Set(extractKeywords(yourText, 30).keywords.map((k) => k.term));
-        const competitorReports = [];
-        const missing = new Map<string, number>();
+
+        const yourKw = extractKeywords(yourText, 40);
+        const yourTerms = new Set(
+          yourKw.keywords.filter((k) => k.score >= GAP_MIN_SCORE).map((k) => k.term),
+        );
+        // Also treat any token that appears >= 2 times in your text as present
+        for (const k of yourKw.keywords) {
+          if (k.term) yourTerms.add(k.term);
+        }
+
+        const competitorReports: unknown[] = [];
+        const missing = new Map<string, { hits: number; bestScore: number }>();
+
         for (const curl of input.competitorUrls) {
-          const page = await fetcher.fetchPage(curl);
+          const result = await fetchOne(fetcher, curl);
+          if (!result.ok) {
+            errors.push({ url: result.url, error: result.error });
+            continue;
+          }
+          const page = result.page;
           const kw = extractKeywords(page.bodyText, 30);
           for (const k of kw.keywords) {
-            if (!yourKw.has(k.term)) missing.set(k.term, (missing.get(k.term) ?? 0) + 1);
+            if (k.score < GAP_MIN_SCORE) continue;
+            if (yourTerms.has(k.term)) continue;
+            const prev = missing.get(k.term);
+            if (!prev) missing.set(k.term, { hits: 1, bestScore: k.score });
+            else {
+              missing.set(k.term, {
+                hits: prev.hits + 1,
+                bestScore: Math.max(prev.bestScore, k.score),
+              });
+            }
           }
           competitorReports.push({
             url: curl,
+            finalUrl: page.finalUrl,
             title: page.title,
             wordCount: page.wordCount,
             topKeywords: kw.keywords.slice(0, 10),
@@ -86,11 +142,23 @@ export function createServices(fetcher: ContentFetcher, serp: SerpProvider): App
             similarity: Number(similarityFromTexts(yourText, page.bodyText).toFixed(4)),
           });
         }
+
         const gaps = [...missing.entries()]
-          .sort((a, b) => b[1] - a[1])
+          .filter(([, v]) => v.hits >= GAP_MIN_COMPETITOR_HITS)
+          .sort((a, b) => b[1].hits - a[1].hits || b[1].bestScore - a[1].bestScore)
           .slice(0, 25)
-          .map(([term, competitorHits]) => ({ term, competitorHits }));
-        return { yourKeywordCount: yourKw.size, gaps, competitors: competitorReports };
+          .map(([term, v]) => ({
+            term,
+            competitorHits: v.hits,
+            bestScore: v.bestScore,
+          }));
+
+        return {
+          yourKeywordCount: yourTerms.size,
+          gaps,
+          competitors: competitorReports,
+          ...(errors.length > 0 ? { errors } : {}),
+        };
       } catch (e) {
         throw toMcpError(e);
       }
@@ -98,11 +166,19 @@ export function createServices(fetcher: ContentFetcher, serp: SerpProvider): App
     async headings(input) {
       try {
         const pages: { url: string; headings: ScrapedPage["headings"] }[] = [];
+        const errors: { url: string; error: string }[] = [];
         for (const url of input.urls) {
-          const page = await fetcher.fetchPage(url);
-          pages.push({ url, headings: page.headings });
+          const result = await fetchOne(fetcher, url);
+          if (!result.ok) {
+            errors.push({ url: result.url, error: result.error });
+            continue;
+          }
+          pages.push({ url, headings: result.page.headings });
         }
-        return { pages: multiHeadingCompare(pages) };
+        return {
+          pages: multiHeadingCompare(pages),
+          ...(errors.length > 0 ? { errors } : {}),
+        };
       } catch (e) {
         throw toMcpError(e);
       }
@@ -135,17 +211,43 @@ export function createServices(fetcher: ContentFetcher, serp: SerpProvider): App
     async cluster(input) {
       try {
         const pages: ScrapedPage[] = [];
+        const errors: { url: string; error: string }[] = [];
         for (const url of input.urls) {
-          pages.push(await fetcher.fetchPage(url));
+          const result = await fetchOne(fetcher, url);
+          if (!result.ok) {
+            errors.push({ url: result.url, error: result.error });
+            continue;
+          }
+          pages.push(result.page);
+        }
+        if (pages.length < 2) {
+          return { clusters: [], errors, note: "Need at least 2 successful page fetches" };
         }
         const texts = pages.map((p) => p.bodyText);
-        const clusters = clusterTexts(texts, input.k);
+        const idf = buildIdf(texts);
+        const vectors = texts.map((t) => tfidfVectorWithIdf(t, idf));
+        // Use corpus IDF vectors for clustering via similarityEngine helper
+        const clusters = clusterTexts(texts, input.k, idf);
         return {
           clusters: clusters.map((c) => ({
             id: c.id,
             urls: c.memberIndexes.map((i) => pages[i]!.url),
             titles: c.memberIndexes.map((i) => pages[i]!.title),
+            avgIntraSimilarity: (() => {
+              const idxs = c.memberIndexes;
+              if (idxs.length < 2) return 1;
+              let sum = 0;
+              let n = 0;
+              for (let i = 0; i < idxs.length; i += 1) {
+                for (let j = i + 1; j < idxs.length; j += 1) {
+                  sum += cosineSimilarity(vectors[idxs[i]!]!, vectors[idxs[j]!]!);
+                  n += 1;
+                }
+              }
+              return n ? Number((sum / n).toFixed(4)) : 1;
+            })(),
           })),
+          ...(errors.length > 0 ? { errors } : {}),
         };
       } catch (e) {
         throw toMcpError(e);

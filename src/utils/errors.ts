@@ -1,3 +1,5 @@
+import { redactSecrets } from "./redact.js";
+
 export const ErrorCodes = {
   InvalidParams: "InvalidParams",
   InternalError: "InternalError",
@@ -7,6 +9,7 @@ export const ErrorCodes = {
   RateLimited: "RATE_LIMITED",
   NoContent: "NO_CONTENT",
   SerpUnconfigured: "SERP_PROVIDER_UNCONFIGURED",
+  SerpFail: "SERP_FAIL",
   HeadlessFail: "HEADLESS_RENDER_FAIL",
   SsrfBlocked: "SSRF_BLOCKED",
   ProviderConfig: "PROVIDER_CONFIG",
@@ -39,7 +42,11 @@ export function isMcpError(value: unknown): value is McpError {
 }
 
 export function toMcpError(err: unknown): McpError {
-  if (isMcpError(err)) return err;
+  if (isMcpError(err)) {
+    const msg = redactSecrets(err.message);
+    if (msg === err.message) return err;
+    return new McpError(err.code, msg, err.details);
+  }
   const message = err instanceof Error ? err.message : String(err);
-  return new McpError(ErrorCodes.InternalError, message);
+  return new McpError(ErrorCodes.InternalError, redactSecrets(message));
 }

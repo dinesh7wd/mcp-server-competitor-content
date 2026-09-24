@@ -25,6 +25,7 @@ function fakePage(over: Partial<ScrapedPage> = {}): ScrapedPage {
     externalLinks: 1,
     images: 1,
     hasSchema: true,
+    schemaTypes: ["Article"],
     brandMentions: [],
     outboundHosts: ["b.com"],
     usedHeadless: false,
@@ -64,6 +65,8 @@ describe("tools integration", () => {
     const res = await tool("scrape_page").handler({ url: "https://a.com" }, services, config);
     expect(res.isError).toBeUndefined();
     expect(res.content[0]?.text).toContain("bodyText");
+    expect(res.content[0]?.text).toContain("UNTRUSTED_WEB_CONTENT");
+    expect(res.content[0]?.text).not.toMatch(/"html":\s*"[^"]/);
   });
 
   it("runs gap analysis with raw_text", async () => {

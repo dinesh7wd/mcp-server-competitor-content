@@ -1,149 +1,118 @@
 import type { AppConfig } from "../config.js";
 import { ErrorCodes, McpError } from "../utils/errors.js";
+import { logger } from "../utils/logger.js";
+import { redactSecrets, safeUrlForLog } from "../utils/redact.js";
 import type { HttpClient } from "./httpClient.js";
 
-export interface SerpFeatureResult {
+export interface SerpOrganic {
+  readonly position: number;
+  readonly title: string;
+  readonly link: string;
+  readonly snippet: string;
+}
+
+export interface SerpFeatures {
   readonly query: string;
-  readonly organic: readonly { title: string; link: string; snippet: string }[];
-  readonly featuredSnippet?: string;
+  readonly organic: readonly SerpOrganic[];
   readonly peopleAlsoAsk: readonly string[];
   readonly relatedSearches: readonly string[];
   readonly hasVideoCarousel: boolean;
-  readonly provider: string;
-}
-
-export interface SerpOptions {
-  readonly region?: string;
+  readonly provider: "serpapi";
 }
 
 export interface SerpProvider {
-  getSerpFeatures(query: string, opts?: SerpOptions): Promise<SerpFeatureResult>;
+  getSerpFeatures(
+    query: string,
+    options?: { region?: string },
+  ): Promise<SerpFeatures>;
 }
 
-function asRecord(v: unknown): Record<string, unknown> {
-  return typeof v === "object" && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
-}
+function parseSerpApi(data: unknown, query: string): SerpFeatures {
+  const root = data && typeof data === "object" ? (data as Record<string, unknown>) : {};
+  const organicRaw = Array.isArray(root.organic_results) ? root.organic_results : [];
+  const organic: SerpOrganic[] = organicRaw
+    .map((item, i) => {
+      const row = item as Record<string, unknown>;
+      return {
+        position: typeof row.position === "number" ? row.position : i + 1,
+        title: String(row.title ?? ""),
+        link: String(row.link ?? ""),
+        snippet: String(row.snippet ?? ""),
+      };
+    })
+    .filter((r) => r.link);
 
-export function createSerpProvider(http: HttpClient, config: AppConfig): SerpProvider {
+  const paa = Array.isArray(root.related_questions)
+    ? root.related_questions
+        .map((q) => String((q as { question?: string }).question ?? ""))
+        .filter(Boolean)
+    : [];
+  const related = Array.isArray(root.related_searches)
+    ? root.related_searches
+        .map((q) => String((q as { query?: string }).query ?? ""))
+        .filter(Boolean)
+    : [];
+  const hasVideo = Array.isArray(root.inline_videos) && root.inline_videos.length > 0;
+
   return {
-    async getSerpFeatures(query: string, opts?: SerpOptions): Promise<SerpFeatureResult> {
-      if (!config.serpProvider || !config.serpApiKey) {
-        throw new McpError(
-          ErrorCodes.SerpUnconfigured,
-          "SERP_PROVIDER and SERP_API_KEY are required for serp_features",
-        );
-      }
-      const region = opts?.region ?? config.serpApiRegion;
-      if (config.serpProvider === "serpapi") {
-        return serpApi(http, config, query, region);
-      }
-      if (config.serpProvider === "google_cse") {
-        return googleCse(http, config, query);
-      }
-      return dataForSeo(http, config, query, region);
-    },
-  };
-}
-
-async function serpApi(
-  http: HttpClient,
-  config: AppConfig,
-  query: string,
-  region: string,
-): Promise<SerpFeatureResult> {
-  const url = `https://serpapi.com/search.json?q=${encodeURIComponent(query)}&engine=google&gl=${encodeURIComponent(region)}&api_key=${config.serpApiKey}`;
-  const res = await http.request({ url, timeoutMs: config.httpTimeoutMs, retries: config.httpRetries });
-  if (res.status !== 200) {
-    throw new McpError(ErrorCodes.ScrapeFail, `SerpApi HTTP ${res.status}`);
-  }
-  const data = asRecord(JSON.parse(res.body) as unknown);
-  const organicRaw = Array.isArray(data.organic_results) ? data.organic_results : [];
-  const organic = organicRaw.flatMap((item) => {
-    const r = asRecord(item);
-    if (typeof r.title !== "string" || typeof r.link !== "string") return [];
-    return [{ title: r.title, link: r.link, snippet: typeof r.snippet === "string" ? r.snippet : "" }];
-  });
-  const paa = Array.isArray(data.related_questions)
-    ? data.related_questions.flatMap((q) => {
-        const r = asRecord(q);
-        return typeof r.question === "string" ? [r.question] : [];
-      })
-    : [];
-  const related = Array.isArray(data.related_searches)
-    ? data.related_searches.flatMap((q) => {
-        const r = asRecord(q);
-        return typeof r.query === "string" ? [r.query] : [];
-      })
-    : [];
-  const answer = asRecord(data.answer_box);
-  const featured =
-    typeof answer.answer === "string"
-      ? answer.answer
-      : typeof answer.snippet === "string"
-        ? answer.snippet
-        : undefined;
-  const result: SerpFeatureResult = {
     query,
     organic,
     peopleAlsoAsk: paa,
     relatedSearches: related,
-    hasVideoCarousel: Array.isArray(data.video_results) && data.video_results.length > 0,
+    hasVideoCarousel: hasVideo,
     provider: "serpapi",
   };
-  if (featured !== undefined) return { ...result, featuredSnippet: featured };
-  return result;
 }
 
-async function googleCse(http: HttpClient, config: AppConfig, query: string): Promise<SerpFeatureResult> {
-  const url = `https://www.googleapis.com/customsearch/v1?q=${encodeURIComponent(query)}&key=${config.serpApiKey}&cx=${encodeURIComponent(config.serpApiRegion)}`;
-  const res = await http.request({ url, timeoutMs: config.httpTimeoutMs, retries: config.httpRetries });
-  if (res.status !== 200) {
-    throw new McpError(ErrorCodes.ScrapeFail, `Google CSE HTTP ${res.status}`);
-  }
-  const data = asRecord(JSON.parse(res.body) as unknown);
-  const items = Array.isArray(data.items) ? data.items : [];
-  const organic = items.flatMap((item) => {
-    const r = asRecord(item);
-    if (typeof r.title !== "string" || typeof r.link !== "string") return [];
-    return [{ title: r.title, link: r.link, snippet: typeof r.snippet === "string" ? r.snippet : "" }];
-  });
+export function createSerpProvider(http: HttpClient, config: AppConfig): SerpProvider {
   return {
-    query,
-    organic,
-    peopleAlsoAsk: [],
-    relatedSearches: [],
-    hasVideoCarousel: false,
-    provider: "google_cse",
-  };
-}
+    async getSerpFeatures(query: string, options = {}): Promise<SerpFeatures> {
+      if (config.serpProvider !== "serpapi" || !config.serpApiKey) {
+        throw new McpError(
+          ErrorCodes.SerpUnconfigured,
+          "Set SERP_PROVIDER=serpapi and SERP_API_KEY. DataForSEO and Google CSE are not supported.",
+        );
+      }
 
-async function dataForSeo(
-  http: HttpClient,
-  config: AppConfig,
-  query: string,
-  region: string,
-): Promise<SerpFeatureResult> {
-  const url = "https://api.dataforseo.com/v3/serp/google/organic/live/advanced";
-  const res = await http.request({
-    url,
-    method: "POST",
-    timeoutMs: config.httpTimeoutMs,
-    retries: config.httpRetries,
-    headers: {
-      Authorization: `Basic ${config.serpApiKey}`,
-      "Content-Type": "application/json",
+      const region = options.region ?? config.serpApiRegion;
+      const url = new URL("https://serpapi.com/search.json");
+      url.searchParams.set("engine", "google");
+      url.searchParams.set("q", query);
+      url.searchParams.set("num", "10");
+      url.searchParams.set("gl", region);
+      url.searchParams.set("api_key", config.serpApiKey);
+
+      try {
+        const res = await http.request({
+          url: url.toString(),
+          timeoutMs: config.httpTimeoutMs,
+          retries: config.httpRetries,
+          validateRedirects: true,
+          maxBodyBytes: 2 * 1024 * 1024,
+        });
+        if (res.status >= 400) {
+          throw new McpError(
+            ErrorCodes.SerpFail,
+            `SerpApi HTTP ${res.status} (credentials redacted)`,
+          );
+        }
+        let data: unknown;
+        try {
+          data = JSON.parse(res.body) as unknown;
+        } catch {
+          throw new McpError(ErrorCodes.SerpFail, "SerpApi returned invalid JSON");
+        }
+        return parseSerpApi(data, query);
+      } catch (err) {
+        if (err instanceof McpError) throw err;
+        const msg = err instanceof Error ? redactSecrets(err.message) : "SERP failed";
+        logger.error("serp_fail", {
+          query,
+          error: msg,
+          url: safeUrlForLog(url.toString()),
+        });
+        throw new McpError(ErrorCodes.SerpFail, msg);
+      }
     },
-    body: JSON.stringify([{ keyword: query, location_code: region, language_code: "en" }]),
-  });
-  if (res.status !== 200) {
-    throw new McpError(ErrorCodes.ScrapeFail, `DataForSEO HTTP ${res.status}`);
-  }
-  return {
-    query,
-    organic: [],
-    peopleAlsoAsk: [],
-    relatedSearches: [],
-    hasVideoCarousel: false,
-    provider: "dataforseo",
   };
 }

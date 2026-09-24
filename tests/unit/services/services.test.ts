@@ -19,6 +19,7 @@ function page(over: Partial<ScrapedPage> = {}): ScrapedPage {
     externalLinks: 0,
     images: 0,
     hasSchema: false,
+    schemaTypes: [],
     brandMentions: [],
     outboundHosts: [],
     usedHeadless: false,
@@ -65,6 +66,23 @@ describe("services", () => {
       competitorUrls: ["https://comp.com"],
     })) as { gaps: unknown[] };
     expect(Array.isArray(res.gaps)).toBe(true);
+  });
+
+  it("returns partial results when one competitor fails", async () => {
+    const mixedFetcher: ContentFetcher = {
+      fetchPage: vi.fn(async (url) => {
+        if (url.includes("bad")) throw new Error("ROBOTS_DISALLOWED: blocked");
+        return page({ url, finalUrl: url, title: `T-${url}` });
+      }),
+    };
+    const svc = createServices(mixedFetcher, serp);
+    const res = (await svc.gap({
+      yourContent: { type: "raw_text", value: "running shoes marathon cushion training race footwear content pad" },
+      competitorUrls: ["https://good.com", "https://bad.com"],
+    })) as { competitors: unknown[]; errors: { url: string }[] };
+    expect(res.competitors).toHaveLength(1);
+    expect(res.errors).toHaveLength(1);
+    expect(res.errors[0]?.url).toContain("bad");
   });
 
   it("headings compare", async () => {

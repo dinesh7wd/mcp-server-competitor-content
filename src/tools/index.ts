@@ -30,6 +30,7 @@ export function registerTools(server: McpServer, services: AppServices, config: 
         title: tool.title,
         description: tool.description,
         inputSchema: toRawShape(tool.schema),
+        ...(tool.annotations ? { annotations: tool.annotations } : {}),
       },
       async (args) => tool.handler(args, services, config),
     );
