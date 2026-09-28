@@ -18,6 +18,7 @@ import {
 import { toCleanContent } from "../engines/scraperEngine.js";
 import { mapWithConcurrency } from "../utils/concurrency.js";
 import { toMcpError } from "../utils/errors.js";
+import { safeUrlForLog } from "../utils/redact.js";
 import { tokenize } from "../utils/textHelpers.js";
 import type {
   ClusterCompetitorsInput,
@@ -33,13 +34,16 @@ import type {
 export interface AppServices {
   scrape(input: ScrapePageInput): Promise<unknown>;
   keywords(input: ExtractKeywordsInput): Promise<unknown>;
-  gap(input: ContentGapInput): Promise<unknown>;
-  headings(input: CompareHeadingsInput): Promise<unknown>;
+  gap(input: ContentGapInput, onProgress?: ProgressReporter): Promise<unknown>;
+  headings(input: CompareHeadingsInput, onProgress?: ProgressReporter): Promise<unknown>;
   readability(input: ReadabilityInput): Promise<unknown>;
   quality(input: QualityInput): Promise<unknown>;
   serp(input: SerpFeaturesInput): Promise<unknown>;
-  cluster(input: ClusterCompetitorsInput): Promise<unknown>;
+  cluster(input: ClusterCompetitorsInput, onProgress?: ProgressReporter): Promise<unknown>;
 }
+
+/** Called after each page fetch in multi-URL tools; must not throw. */
+export type ProgressReporter = (progress: number, total: number, message: string) => Promise<void>;
 
 interface FetchError {
   readonly url: string;
@@ -82,8 +86,15 @@ async function fetchOne(
 async function fetchAll(
   fetcher: ContentFetcher,
   urls: readonly string[],
+  onProgress?: ProgressReporter,
 ): Promise<{ pages: FetchedPage[]; errors: FetchError[] }> {
-  const outcomes = await mapWithConcurrency(urls, FETCH_CONCURRENCY, (u) => fetchOne(fetcher, u));
+  let done = 0;
+  const outcomes = await mapWithConcurrency(urls, FETCH_CONCURRENCY, async (u) => {
+    const outcome = await fetchOne(fetcher, u);
+    done += 1;
+    await onProgress?.(done, urls.length, `Fetched ${done}/${urls.length}: ${safeUrlForLog(u)}`);
+    return outcome;
+  });
   const pages: FetchedPage[] = [];
   const errors: FetchError[] = [];
   outcomes.forEach((o, i) => {
@@ -180,18 +191,18 @@ export function createServices(fetcher: ContentFetcher, serp: SerpProvider): App
       }),
     keywords: (input) =>
       guard(async () => extractKeywords(await resolveText(fetcher, input.url, input.text), input.topK)),
-    gap: (input) =>
+    gap: (input, onProgress) =>
       guard(async () => {
         const yours = await resolveYourContent(fetcher, input.yourContent);
         if (!yours.ok) {
           return { yourKeywordCount: 0, gaps: [], competitors: [], errors: [yours.error] };
         }
-        const { pages, errors } = await fetchAll(fetcher, input.competitorUrls);
+        const { pages, errors } = await fetchAll(fetcher, input.competitorUrls, onProgress);
         return withErrors(buildGapReport(yours.content, pages), errors);
       }),
-    headings: (input) =>
+    headings: (input, onProgress) =>
       guard(async () => {
-        const { pages, errors } = await fetchAll(fetcher, input.urls);
+        const { pages, errors } = await fetchAll(fetcher, input.urls, onProgress);
         const outlines = pages.map((p) => ({ url: p.url, headings: p.page.headings }));
         return withErrors({ pages: multiHeadingCompare(outlines) }, errors);
       }),
@@ -208,9 +219,9 @@ export function createServices(fetcher: ContentFetcher, serp: SerpProvider): App
           ...(input.region !== undefined ? { region: input.region } : {}),
         }),
       ),
-    cluster: (input) =>
+    cluster: (input, onProgress) =>
       guard(async () => {
-        const { pages, errors } = await fetchAll(fetcher, input.urls);
+        const { pages, errors } = await fetchAll(fetcher, input.urls, onProgress);
         if (pages.length < 2) {
           return { clusters: [], errors, note: "Need at least 2 successful page fetches" };
         }

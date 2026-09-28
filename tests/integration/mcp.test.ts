@@ -1,6 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import {
+  CallToolResultSchema,
+  ProgressNotificationSchema,
+} from "@modelcontextprotocol/sdk/types.js";
+import { toolContext } from "../../src/tools/index.js";
 import { loadConfig } from "../../src/config.js";
 import { createServer, type ServerInstance } from "../../src/server.js";
 import type { ContentFetcher, ScrapedPage } from "../../src/infrastructure/contentFetcher.js";
@@ -106,11 +111,63 @@ describe("MCP server over in-memory transport", () => {
     expect(JSON.parse(content[0]?.text ?? "{}")).toHaveProperty("fleschKincaidGrade");
   });
 
+  it("sends progress notifications for multi-URL tools when a progressToken is present", async () => {
+    const cases = [
+      { name: "compare_headings", arguments: { urls: ["https://a.com", "https://b.com"] } },
+      {
+        name: "content_gap_analysis",
+        arguments: {
+          yourContent: { type: "url", value: "https://a.com" },
+          competitorUrls: ["https://b.com", "https://c.com"],
+        },
+      },
+      {
+        name: "cluster_competitors",
+        arguments: { urls: ["https://a.com", "https://b.com", "https://c.com"], k: 2 },
+      },
+    ];
+    for (const call of cases) {
+      const events: { progress: number; total?: number | undefined; message?: string | undefined }[] = [];
+      const result = await client.callTool(call, CallToolResultSchema, {
+        onprogress: (p) => events.push(p),
+      });
+      const total = events[0]?.total ?? 0;
+      expect(result.isError, call.name).toBeFalsy();
+      expect(total, call.name).toBeGreaterThan(0);
+      expect(events.map((e) => e.progress), call.name).toEqual(
+        Array.from({ length: total }, (_, i) => i + 1),
+      );
+      expect(events[0]?.message, call.name).toMatch(/^Fetched 1\//);
+    }
+  });
+
+  it("sends no progress without a progressToken", async () => {
+    const events: unknown[] = [];
+    client.setNotificationHandler(ProgressNotificationSchema, (n) => void events.push(n));
+    await client.callTool({ name: "compare_headings", arguments: { urls: ["https://a.com", "https://b.com"] } });
+    expect(events).toEqual([]);
+  });
+
   it("returns tool errors as isError results", async () => {
     const result = await client.callTool({
       name: "extract_keywords",
       arguments: { url: "https://a.com", text: "both url and text supplied here" },
     });
     expect(result.isError).toBe(true);
+  });
+});
+
+describe("toolContext", () => {
+  it("swallows notification send failures", async () => {
+    const sendNotification = vi.fn(async () => {
+      throw new Error("transport closed");
+    });
+    const ctx = toolContext({ _meta: { progressToken: "t1" }, sendNotification });
+    await expect(ctx.reportProgress?.(1, 2, "x")).resolves.toBeUndefined();
+    expect(sendNotification).toHaveBeenCalledWith({
+      method: "notifications/progress",
+      params: { progressToken: "t1", progress: 1, total: 2, message: "x" },
+    });
+    expect(toolContext({ sendNotification }).reportProgress).toBeUndefined();
   });
 });

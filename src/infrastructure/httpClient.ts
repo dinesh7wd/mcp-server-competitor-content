@@ -1,5 +1,6 @@
 import dns from "node:dns/promises";
 import { Agent, fetch as undiciFetch } from "undici";
+import { decodeBody } from "../utils/charset.js";
 import { ErrorCodes, McpError } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
 import { redactSecrets, safeUrlForLog } from "../utils/redact.js";
@@ -116,8 +117,8 @@ async function readLimitedBody(
   body: FetchResponseLike["body"],
   maxBytes: number,
   truncate: boolean,
-): Promise<string> {
-  if (!body) return "";
+): Promise<Uint8Array> {
+  if (!body) return new Uint8Array(0);
   const reader = body.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
@@ -136,7 +137,7 @@ async function readLimitedBody(
     total += value.byteLength;
     chunks.push(value);
   }
-  return new TextDecoder("utf-8", { fatal: false }).decode(Buffer.concat(chunks, total));
+  return Buffer.concat(chunks, total);
 }
 
 function contentTypeAllowed(
@@ -201,8 +202,14 @@ async function finishResponse(
     );
   }
   const maxBytes = req.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
-  const body = await readLimitedBody(res.body, maxBytes, req.truncateBody === true);
-  return { status: res.status, body, headers, finalUrl: state.url, redirectCount: state.redirects };
+  const bytes = await readLimitedBody(res.body, maxBytes, req.truncateBody === true);
+  return {
+    status: res.status,
+    body: decodeBody(bytes, headers["content-type"]),
+    headers,
+    finalUrl: state.url,
+    redirectCount: state.redirects,
+  };
 }
 
 async function followRedirects(

@@ -83,11 +83,13 @@ Note: Claude Code caps MCP responses (~25k tokens). `scrape_page` returns at mos
 | `serp_features` | SerpApi only (`SERP_PROVIDER=serpapi`) |
 | `cluster_competitors` | Corpus TF-IDF cosine clustering |
 
-Multi-URL tools fetch up to 3 pages at a time; requests to the same host are still spaced by `RATE_LIMIT_DELAY_MS`.
+Multi-URL tools fetch up to 3 pages at a time; requests to the same host are still spaced by `RATE_LIMIT_DELAY_MS`. `content_gap_analysis`, `compare_headings`, and `cluster_competitors` send `notifications/progress` (one per fetched page) when the client supplies a `progressToken`.
+
+Pages are decoded using the BOM, then the `Content-Type` charset, then a `<meta charset>` / `http-equiv` tag in the first 2 KB, then UTF-8 (unknown labels fall back to UTF-8). Headless renders wait for `domcontentloaded`, then up to 3 s for network idle within `HEADLESS_TIMEOUT_MS`.
 
 ## Security
 
-- Every hostname is resolved and all A/AAAA records must be public (private, loopback, CGNAT, link-local, documentation, benchmark, IPv6 ULA/site-local, and NAT64/6to4/IPv4-mapped forms of those are blocked). The HTTP client connects only to the addresses it validated, so DNS rebinding cannot swap in a private IP between check and connect.
+- Every hostname is resolved and all A/AAAA records must be public (private, loopback, CGNAT, link-local, documentation, benchmark, IPv6 ULA/site-local, and NAT64/6to4/IPv4-mapped forms of those are blocked; Teredo `2001::/32` addresses are not decoded to their embedded IPv4). The HTTP client connects only to the addresses it validated, so DNS rebinding cannot swap in a private IP between check and connect.
 - Redirects use `redirect: "manual"` and are re-validated per hop.
 - Playwright blocks service workers and WebSockets, aborts requests to blocked destinations, and uses your configured `USER_AGENT`. Chromium does its own DNS resolution, so the headless path is not pinned the way the HTTP client is.
 - API keys are stripped from error messages and stderr logs (query strings redacted).

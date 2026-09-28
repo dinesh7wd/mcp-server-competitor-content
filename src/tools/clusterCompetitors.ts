@@ -13,8 +13,8 @@ export const clusterCompetitorsTool: ToolDefinition<typeof clusterCompetitorsInp
     destructiveHint: false,
     idempotentHint: true,
   },
-  handler: (raw, services, config) =>
+  handler: (raw, services, config, ctx) =>
     runTool(clusterCompetitorsInputSchema, raw, services, config, (input) =>
-      services.cluster(input),
+      services.cluster(input, ctx?.reportProgress),
     ),
 };

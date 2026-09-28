@@ -16,6 +16,10 @@ declare module "playwright" {
 
   export interface Page {
     goto(url: string, options?: { waitUntil?: string; timeout?: number }): Promise<Response | null>;
+    waitForLoadState(
+      state?: "load" | "domcontentloaded" | "networkidle",
+      options?: { timeout?: number },
+    ): Promise<void>;
     content(): Promise<string>;
     url(): string;
   }

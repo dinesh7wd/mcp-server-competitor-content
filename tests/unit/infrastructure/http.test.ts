@@ -95,6 +95,15 @@ describe("httpClient", () => {
     expect(cut.body).toHaveLength(1000);
   });
 
+  it("decodes windows-1252 bodies using the Content-Type charset", async () => {
+    const bytes = Uint8Array.from([0x93, 0x63, 0x61, 0x66, 0xe9, 0x94]);
+    const fetchImpl = vi.fn<FetchLike>().mockResolvedValue(
+      new Response(bytes, { status: 200, headers: { "content-type": "text/html; charset=windows-1252" } }),
+    );
+    const out = await client(fetchImpl).request({ url: "https://a.example/" });
+    expect(out.body).toBe("\u201ccafé\u201d");
+  });
+
   it("rejects disallowed content types on success responses only", async () => {
     const fetchImpl = vi
       .fn<FetchLike>()

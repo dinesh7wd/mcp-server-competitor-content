@@ -17,6 +17,8 @@ export interface HeadlessRenderer {
 
 const LOCAL_SCHEMES = new Set(["data:", "blob:"]);
 const NETWORK_SCHEMES = new Set(["http:", "https:", "ws:", "wss:"]);
+/** Best-effort wait for SPA data fetches after DOMContentLoaded; timeouts are ignored. */
+export const NETWORK_IDLE_WAIT_MS = 3000;
 
 /** Per-render verdict cache so each hostname is resolved once, not once per subresource. */
 export function createRequestGuard(lookup?: LookupFn): (rawUrl: string) => Promise<boolean> {
@@ -84,7 +86,12 @@ export function createHeadlessRenderer(defaultConfig?: AppConfig, lookup?: Looku
   async function renderInContext(context: BrowserContext, url: string, cfg: AppConfig): Promise<RenderResult> {
     const isAllowed = await installGuards(context, lookup);
     const page = await context.newPage();
+    const started = Date.now();
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: cfg.headlessTimeoutMs });
+    const idleBudget = Math.min(NETWORK_IDLE_WAIT_MS, cfg.headlessTimeoutMs - (Date.now() - started));
+    if (idleBudget > 0) {
+      await page.waitForLoadState("networkidle", { timeout: idleBudget }).catch(() => undefined);
+    }
     const html = await page.content();
     const finalUrl = page.url();
     if (!(await isAllowed(finalUrl))) {

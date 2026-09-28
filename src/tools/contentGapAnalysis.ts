@@ -13,6 +13,8 @@ export const contentGapAnalysisTool: ToolDefinition<typeof contentGapInputSchema
     destructiveHint: false,
     idempotentHint: true,
   },
-  handler: (raw, services, config) =>
-    runTool(contentGapInputSchema, raw, services, config, (input) => services.gap(input)),
+  handler: (raw, services, config, ctx) =>
+    runTool(contentGapInputSchema, raw, services, config, (input) =>
+      services.gap(input, ctx?.reportProgress),
+    ),
 };

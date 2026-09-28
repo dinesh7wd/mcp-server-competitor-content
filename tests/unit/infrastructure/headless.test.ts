@@ -3,6 +3,7 @@ import { loadConfig } from "../../../src/config.js";
 import {
   createHeadlessRenderer,
   createRequestGuard,
+  NETWORK_IDLE_WAIT_MS,
 } from "../../../src/infrastructure/headlessRenderer.js";
 import { ErrorCodes } from "../../../src/utils/errors.js";
 import type { LookupFn } from "../../../src/utils/validators.js";
@@ -21,6 +22,8 @@ const state = vi.hoisted(() => ({
   finalUrl: "https://public.test/final",
   gotoError: null as Error | null,
   subresources: [] as string[],
+  idleWait: vi.fn(),
+  gotoDelayMs: 0,
 }));
 
 vi.mock("playwright", () => ({ chromium: { launch: state.launch } }));
@@ -42,6 +45,7 @@ function fakeBrowser(): { newContext: ReturnType<typeof vi.fn>; close: ReturnTyp
         newPage: async () => ({
           goto: async (url: string) => {
             if (state.gotoError) throw state.gotoError;
+            if (state.gotoDelayMs) await new Promise((r) => setTimeout(r, state.gotoDelayMs));
             for (const u of [url, ...state.subresources]) {
               await handler?.({
                 request: () => ({ url: () => u }),
@@ -51,6 +55,7 @@ function fakeBrowser(): { newContext: ReturnType<typeof vi.fn>; close: ReturnTyp
             }
             return { url: () => state.finalUrl };
           },
+          waitForLoadState: state.idleWait,
           content: async () => "<html><body><p>Rendered</p></body></html>",
           url: () => state.finalUrl,
         }),
@@ -75,6 +80,9 @@ beforeEach(() => {
   state.finalUrl = "https://public.test/final";
   state.gotoError = null;
   state.subresources = [];
+  state.gotoDelayMs = 0;
+  state.idleWait.mockReset();
+  state.idleWait.mockResolvedValue(undefined);
 });
 
 describe("headless renderer", () => {
@@ -88,6 +96,34 @@ describe("headless renderer", () => {
     expect(state.routed.continued).toContain("data:image/png;base64,AA");
     expect(state.wsClosed).toBe(1);
     expect(state.contexts[0]?.close).toHaveBeenCalled();
+  });
+
+  it("waits for network idle within the remaining budget", async () => {
+    const renderer = createHeadlessRenderer(
+      loadConfig({ ...process.env, HEADLESS_TIMEOUT_MS: "10000" }),
+      lookup,
+    );
+    await renderer.render("https://public.test/page");
+    expect(state.idleWait).toHaveBeenCalledWith("networkidle", { timeout: NETWORK_IDLE_WAIT_MS });
+
+    state.idleWait.mockClear();
+    await createHeadlessRenderer(config, lookup).render("https://public.test/page");
+    const [, options] = state.idleWait.mock.calls[0] as [string, { timeout: number }];
+    expect(options.timeout).toBeGreaterThan(0);
+    expect(options.timeout).toBeLessThanOrEqual(1000);
+  });
+
+  it("ignores a network-idle timeout and skips the wait when the budget is spent", async () => {
+    state.idleWait.mockRejectedValue(new Error("Timeout 3000ms exceeded"));
+    const renderer = createHeadlessRenderer(config, lookup);
+    await expect(renderer.render("https://public.test/page")).resolves.toMatchObject({
+      html: expect.stringContaining("Rendered"),
+    });
+
+    state.idleWait.mockClear();
+    state.gotoDelayMs = 1100;
+    await expect(renderer.render("https://public.test/page")).resolves.toBeDefined();
+    expect(state.idleWait).not.toHaveBeenCalled();
   });
 
   it("rejects a final URL on a blocked host and still closes the context", async () => {

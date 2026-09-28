@@ -1,6 +1,6 @@
 import { ZodError, type z } from "zod";
 import type { AppConfig } from "../config.js";
-import type { AppServices } from "../services/index.js";
+import type { AppServices, ProgressReporter } from "../services/index.js";
 import { ErrorCodes, isMcpError, McpError, toMcpError } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
 import { redactSecrets } from "../utils/redact.js";
@@ -19,13 +19,23 @@ export interface ToolAnnotations {
   readonly idempotentHint?: boolean;
 }
 
+/** Per-call context; reportProgress is set only when the client sent a progressToken. */
+export interface ToolContext {
+  readonly reportProgress?: ProgressReporter;
+}
+
 export interface ToolDefinition<T extends z.ZodType> {
   readonly name: string;
   readonly title: string;
   readonly description: string;
   readonly schema: T;
   readonly annotations?: ToolAnnotations;
-  readonly handler: (raw: unknown, services: AppServices, config: AppConfig) => Promise<ToolResult>;
+  readonly handler: (
+    raw: unknown,
+    services: AppServices,
+    config: AppConfig,
+    ctx?: ToolContext,
+  ) => Promise<ToolResult>;
 }
 
 export function ok(data: unknown): ToolResult {

@@ -13,6 +13,8 @@ export const compareHeadingsTool: ToolDefinition<typeof compareHeadingsInputSche
     destructiveHint: false,
     idempotentHint: true,
   },
-  handler: (raw, services, config) =>
-    runTool(compareHeadingsInputSchema, raw, services, config, (input) => services.headings(input)),
+  handler: (raw, services, config, ctx) =>
+    runTool(compareHeadingsInputSchema, raw, services, config, (input) =>
+      services.headings(input, ctx?.reportProgress),
+    ),
 };
