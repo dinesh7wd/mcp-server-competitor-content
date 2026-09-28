@@ -5,7 +5,7 @@ export const compareHeadingsTool: ToolDefinition<typeof compareHeadingsInputSche
   name: "compare_headings",
   title: "Compare headings",
   description:
-    "Diff document-order H1–H6 outlines across competitor URLs. Partial results if some URLs fail.",
+    "List the document-order H1–H6 outline of each URL side by side for comparison. Partial results if some URLs fail.",
   schema: compareHeadingsInputSchema,
   annotations: {
     readOnlyHint: true,

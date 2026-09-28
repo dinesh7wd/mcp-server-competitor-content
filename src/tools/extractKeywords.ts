@@ -5,7 +5,7 @@ export const extractKeywordsTool: ToolDefinition<typeof extractKeywordsInputSche
   name: "extract_keywords",
   title: "Extract keywords",
   description:
-    "Extract ranked keywords and bigrams from a URL or raw text (BM25-style saturation scoring).",
+    "Extract ranked keywords and bigrams from a URL or raw text (sublinear term-frequency scoring: more occurrences always rank higher).",
   schema: extractKeywordsInputSchema,
   annotations: {
     readOnlyHint: true,

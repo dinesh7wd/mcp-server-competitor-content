@@ -5,7 +5,7 @@ export const contentQualityScoreTool: ToolDefinition<typeof qualityInputSchema> 
   name: "content_quality_score",
   title: "Content quality score",
   description:
-    "Score on-page quality: word count, links, media, JSON-LD schema, meta description, headings.",
+    "Score on-page quality: word count, links, media, JSON-LD schema, meta description, headings. Returns a summary only (use scrape_page for body text).",
   schema: qualityInputSchema,
   annotations: {
     readOnlyHint: true,

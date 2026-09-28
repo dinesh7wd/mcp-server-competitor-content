@@ -6,41 +6,44 @@ export interface KeywordResult {
   readonly tokenCount: number;
 }
 
+export type IdfMap = ReadonlyMap<string, number>;
+
 function termFreq(tokens: readonly string[]): Map<string, number> {
   const map = new Map<string, number>();
   for (const t of tokens) map.set(t, (map.get(t) ?? 0) + 1);
   return map;
 }
 
-/**
- * Single-document keyword ranking using BM25-style saturation so scores
- * do not flatten (50 vs 200 occurrences stay distinguishable).
- */
-function rankTerms(freq: Map<string, number>, topK: number): { term: string; score: number }[] {
-  const N = [...freq.values()].reduce((a, b) => a + b, 0) || 1;
-  const avgdl = N;
-  const k1 = 1.5;
-  const b = 0.75;
-  const ranked: { term: string; score: number }[] = [];
-  for (const [term, count] of freq) {
-    const tf = count;
-    const denom = tf + k1 * (1 - b + b * (N / avgdl));
-    const score = (tf * (k1 + 1)) / denom;
-    // Length-normalized rarity boost: rarer within doc (lower df relative) gets slight boost via 1/sqrt(count)
-    const boosted = score * (1 + Math.log(1 + N / count));
-    ranked.push({ term, score: Number(boosted.toFixed(4)) });
-  }
-  return ranked.sort((a, b) => b.score - a.score || b.term.localeCompare(a.term)).slice(0, topK);
+/** Sublinear TF: strictly increasing in count, so frequent terms never rank below rare ones. */
+export function sublinearTf(count: number): number {
+  return count > 0 ? 1 + Math.log(count) : 0;
 }
 
-export function extractKeywords(text: string, topK = 15): KeywordResult {
+/**
+ * Rank terms by sublinear TF. Rarity only enters through a corpus IDF map
+ * (terms missing from the map get weight 1).
+ */
+function rankTerms(
+  freq: Map<string, number>,
+  topK: number,
+  idf?: IdfMap,
+): { term: string; score: number }[] {
+  const ranked: { term: string; score: number }[] = [];
+  for (const [term, count] of freq) {
+    const score = sublinearTf(count) * (idf?.get(term) ?? 1);
+    ranked.push({ term, score: Number(score.toFixed(4)) });
+  }
+  return ranked.sort((a, b) => b.score - a.score || a.term.localeCompare(b.term)).slice(0, topK);
+}
+
+export function extractKeywords(text: string, topK = 15, idf?: IdfMap): KeywordResult {
   const tokens = tokenize(text);
-  const uni = rankTerms(termFreq(tokens), topK);
+  const uni = rankTerms(termFreq(tokens), topK, idf);
   const bi = rankTerms(termFreq(ngrams(tokens, 2)), Math.min(10, topK));
   return { keywords: uni, bigrams: bi, tokenCount: tokens.length };
 }
 
-/** Document frequency across a corpus → IDF map. */
+/** Document frequency across a corpus → smoothed IDF map (always >= 1). */
 export function buildIdf(texts: readonly string[]): Map<string, number> {
   const df = new Map<string, number>();
   const docs = texts.length || 1;
@@ -56,7 +59,7 @@ export function buildIdf(texts: readonly string[]): Map<string, number> {
 }
 
 /** TF-IDF vector using corpus IDF (falls back to TF-only if IDF missing). */
-export function tfidfVectorWithIdf(text: string, idf?: Map<string, number>): Map<string, number> {
+export function tfidfVectorWithIdf(text: string, idf?: IdfMap): Map<string, number> {
   const tokens = tokenize(text);
   const freq = termFreq(tokens);
   const N = tokens.length || 1;
@@ -67,9 +70,4 @@ export function tfidfVectorWithIdf(text: string, idf?: Map<string, number>): Map
     vec.set(term, tf * w);
   }
   return vec;
-}
-
-/** @deprecated Prefer tfidfVectorWithIdf with buildIdf for multi-doc similarity. */
-export function tfidfVector(text: string): Map<string, number> {
-  return tfidfVectorWithIdf(text);
 }

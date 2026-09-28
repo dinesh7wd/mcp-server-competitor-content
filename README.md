@@ -6,6 +6,8 @@ MCP server for competitor content analysis: scrape, keywords, content gaps, head
 
 ## Install
 
+Requires Node.js 22 or newer.
+
 ```bash
 cd mcp-server-competitor-content
 npm install
@@ -66,30 +68,36 @@ Add to `claude_desktop_config.json` (absolute path required):
 claude mcp add competitor-content -- node /absolute/path/mcp-server-competitor-content/dist/index.js
 ```
 
-Note: Claude Code caps MCP responses (~25k tokens). Prefer tools that return summaries over huge scrapes.
+Note: Claude Code caps MCP responses (~25k tokens). `scrape_page` returns at most `maxChars` characters of body text (default 20,000, max 100,000) and sets `truncated: true` when it cuts.
 
 ## Tools
 
 | Tool | Description |
 |------|-------------|
-| `scrape_page` | Clean body, document-order headings, meta, links, JSON-LD (no raw HTML) |
+| `scrape_page` | Clean body (capped by `maxChars`), document-order headings, meta, links, JSON-LD (no raw HTML) |
 | `extract_keywords` | Ranked keywords/bigrams from URL or text |
 | `content_gap_analysis` | Your `url` or `raw_text` vs competitors (partial results on failures) |
-| `compare_headings` | H1–H6 outline comparison |
+| `compare_headings` | H1–H6 outlines per URL, side by side |
 | `readability_score` | Flesch-Kincaid, SMOG, Coleman-Liau |
-| `content_quality_score` | Word count, links, media, schema, meta |
+| `content_quality_score` | Word count, links, media, schema, meta (summary only, no body text) |
 | `serp_features` | SerpApi only (`SERP_PROVIDER=serpapi`) |
 | `cluster_competitors` | Corpus TF-IDF cosine clustering |
 
+Multi-URL tools fetch up to 3 pages at a time; requests to the same host are still spaced by `RATE_LIMIT_DELAY_MS`.
+
 ## Security
 
-- DNS is resolved before each fetch; private/loopback/CGNAT/link-local/IPv6 ULA/metadata hosts are blocked.
+- Every hostname is resolved and all A/AAAA records must be public (private, loopback, CGNAT, link-local, documentation, benchmark, IPv6 ULA/site-local, and NAT64/6to4/IPv4-mapped forms of those are blocked). The HTTP client connects only to the addresses it validated, so DNS rebinding cannot swap in a private IP between check and connect.
 - Redirects use `redirect: "manual"` and are re-validated per hop.
-- Playwright aborts requests to blocked destinations and uses your configured `USER_AGENT`.
+- Playwright blocks service workers and WebSockets, aborts requests to blocked destinations, and uses your configured `USER_AGENT`. Chromium does its own DNS resolution, so the headless path is not pinned the way the HTTP client is.
 - API keys are stripped from error messages and stderr logs (query strings redacted).
 - Response bodies are capped (`MAX_BODY_BYTES`, default 2MB); text capped (`MAX_TEXT_CHARS`).
 - `scrape_page` never returns raw HTML; `bodyText` is wrapped as untrusted content.
-- robots.txt: multi-agent groups, `*`/`$` patterns, 5xx → deny (RFC 9309).
+- robots.txt (RFC 9309): product-token matching, merged groups, case-sensitive `*`/`$` patterns, 4xx → allow, 5xx → deny, unreachable → deny for 60 s, files over 512 KiB truncated and parsed. Redirects to another host are checked against that host's robots.txt.
+
+## Configuration
+
+Set env vars in your MCP client config; see `.env.example` for all of them. `NODE_ENV=production` hides unexpected internal error messages from clients (default `development` shows them).
 
 ## SERP
 
@@ -99,7 +107,8 @@ Only **SerpApi** is supported. DataForSEO and Google CSE stubs were removed (bro
 
 ```bash
 npm test
-npm run test:coverage
+npm run test:coverage   # enforces 80% statements/branches/functions/lines over src/
+npm run typecheck       # includes tests
 npm run build
 npm run lint
 ```

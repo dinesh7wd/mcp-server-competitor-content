@@ -29,7 +29,7 @@ export interface ToolDefinition<T extends z.ZodType> {
 }
 
 export function ok(data: unknown): ToolResult {
-  return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+  return { content: [{ type: "text", text: JSON.stringify(data) }] };
 }
 
 export function fail(err: unknown, nodeEnv: AppConfig["nodeEnv"]): ToolResult {

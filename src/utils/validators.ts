@@ -7,79 +7,96 @@ export type LookupFn = (
   options: { all: true; verbatim: true },
 ) => Promise<ReadonlyArray<{ address: string; family: number }>>;
 
-function parseIpv4(ip: string): number[] | null {
-  const parts = ip.split(".").map(Number);
-  if (parts.length !== 4 || parts.some((p) => !Number.isInteger(p) || p < 0 || p > 255)) {
-    return null;
-  }
-  return parts;
+export interface ResolvedAddress {
+  readonly address: string;
+  readonly family: number;
 }
 
-/** Block private, loopback, link-local, CGNAT, multicast, reserved IPv4. */
+const IPV4_BLOCKED_SUBNETS: ReadonlyArray<readonly [string, number]> = [
+  ["0.0.0.0", 8],
+  ["10.0.0.0", 8],
+  ["100.64.0.0", 10],
+  ["127.0.0.0", 8],
+  ["169.254.0.0", 16],
+  ["172.16.0.0", 12],
+  ["192.0.0.0", 24],
+  ["192.0.2.0", 24],
+  ["192.168.0.0", 16],
+  ["198.18.0.0", 15],
+  ["198.51.100.0", 24],
+  ["203.0.113.0", 24],
+  ["224.0.0.0", 4],
+  ["240.0.0.0", 4],
+];
+
+const IPV4_BLOCKLIST = new net.BlockList();
+for (const [prefix, bits] of IPV4_BLOCKED_SUBNETS) IPV4_BLOCKLIST.addSubnet(prefix, bits, "ipv4");
+
+/** Private, loopback, link-local, CGNAT, documentation, benchmark, multicast, reserved IPv4. */
 export function isBlockedIpv4(ip: string): boolean {
-  const parts = parseIpv4(ip);
-  if (!parts) return false;
-  const [a, b] = parts as [number, number, number, number];
-  if (a === 0 || a === 127) return true;
-  if (a === 10) return true;
-  if (a === 100 && b >= 64 && b <= 127) return true;
-  if (a === 169 && b === 254) return true;
-  if (a === 172 && b >= 16 && b <= 31) return true;
-  if (a === 192 && b === 168) return true;
-  if (a === 192 && b === 0) return true;
-  if (a >= 224) return true;
-  return false;
+  if (!net.isIPv4(ip)) return false;
+  return IPV4_BLOCKLIST.check(ip, "ipv4");
 }
 
-function expandIpv6(ip: string): string {
-  const clean = ip.toLowerCase().replace(/^\[|\]$/g, "");
-  const halves = clean.split("::");
-  let head = halves[0] ? halves[0].split(":").filter(Boolean) : [];
-  let tail = halves[1] ? halves[1].split(":").filter(Boolean) : [];
-  if (halves.length === 1) {
-    head = clean.split(":").filter(Boolean);
-    tail = [];
+function stripBrackets(ip: string): string {
+  return ip.replace(/^\[|\]$/g, "");
+}
+
+/** Parse any valid IPv6 text form (incl. embedded dotted IPv4) into 8 hextets. */
+export function parseIpv6(ip: string): number[] | null {
+  let s = stripBrackets(ip).toLowerCase().split("%")[0] ?? "";
+  const dotted = s.match(/^(.*:)(\d{1,3}(?:\.\d{1,3}){3})$/);
+  if (dotted?.[1] && dotted[2]) {
+    if (!net.isIPv4(dotted[2])) return null;
+    const [a, b, c, d] = dotted[2].split(".").map(Number) as [number, number, number, number];
+    s = `${dotted[1]}${((a << 8) | b).toString(16)}:${((c << 8) | d).toString(16)}`;
   }
-  const missing = 8 - head.length - tail.length;
-  const full = [...head, ...Array(Math.max(0, missing)).fill("0"), ...tail];
-  return full.map((h) => h.padStart(4, "0")).join(":");
+  const halves = s.split("::");
+  if (halves.length > 2) return null;
+  const head = halves[0] ? halves[0].split(":") : [];
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
+  const fill = halves.length === 2 ? 8 - head.length - tail.length : 0;
+  if (fill < 0 || (halves.length === 2 && fill === 0)) return null;
+  const groups = [...head, ...Array<string>(fill).fill("0"), ...tail];
+  if (groups.length !== 8 || groups.some((g) => !/^[0-9a-f]{1,4}$/.test(g))) return null;
+  return groups.map((g) => parseInt(g, 16));
 }
 
-/** Block loopback, ULA, link-local, multicast, IPv4-mapped private, AWS metadata IPv6. */
+function hextetsToIpv4(hi: number, lo: number): string {
+  return `${hi >> 8}.${hi & 0xff}.${lo >> 8}.${lo & 0xff}`;
+}
+
+/** IPv4 embedded by mapped, compatible, SIIT, NAT64 or 6to4 IPv6 addresses. */
+function embeddedIpv4(h: readonly number[]): string | null {
+  const zero = (from: number, to: number): boolean => h.slice(from, to).every((x) => x === 0);
+  if (zero(0, 5) && h[5] === 0xffff) return hextetsToIpv4(h[6]!, h[7]!);
+  if (zero(0, 4) && h[4] === 0xffff && h[5] === 0) return hextetsToIpv4(h[6]!, h[7]!);
+  if (zero(0, 6)) return hextetsToIpv4(h[6]!, h[7]!);
+  if (h[0] === 0x64 && h[1] === 0xff9b && (zero(2, 6) || h[2] === 1)) {
+    return hextetsToIpv4(h[6]!, h[7]!);
+  }
+  if (h[0] === 0x2002) return hextetsToIpv4(h[1]!, h[2]!);
+  return null;
+}
+
+/** Loopback, unspecified, ULA, link/site-local, multicast, documentation, and embedded private IPv4. */
 export function isBlockedIpv6(ip: string): boolean {
-  const raw = ip.toLowerCase().replace(/^\[|\]$/g, "");
-  if (raw === "::1" || raw === "::" || raw === "0:0:0:0:0:0:0:1") return true;
-
-  const v4mapped = raw.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/i);
-  if (v4mapped?.[1]) return isBlockedIpv4(v4mapped[1]);
-  const v4mappedHex = raw.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i);
-  if (v4mappedHex?.[1] && v4mappedHex[2]) {
-    const hi = parseInt(v4mappedHex[1], 16);
-    const lo = parseInt(v4mappedHex[2], 16);
-    const a = (hi >> 8) & 0xff;
-    const b = hi & 0xff;
-    const c = (lo >> 8) & 0xff;
-    const d = lo & 0xff;
-    return isBlockedIpv4(`${a}.${b}.${c}.${d}`);
-  }
-
-  let expanded: string;
-  try {
-    expanded = expandIpv6(raw);
-  } catch {
-    return true;
-  }
-  const first = expanded.split(":")[0] ?? "";
-  const firstNum = parseInt(first, 16);
-  if ((firstNum & 0xffc0) === 0xfe80) return true;
-  if ((firstNum & 0xfe00) === 0xfc00) return true;
-  if ((firstNum & 0xff00) === 0xff00) return true;
-  if (expanded.startsWith("fd00:0ec2:")) return true;
+  const h = parseIpv6(ip);
+  if (!h) return true;
+  const v4 = embeddedIpv4(h);
+  if (v4 !== null && isBlockedIpv4(v4)) return true;
+  const first = h[0]!;
+  if ((first & 0xfe00) === 0xfc00) return true;
+  if ((first & 0xffc0) === 0xfe80) return true;
+  if ((first & 0xffc0) === 0xfec0) return true;
+  if ((first & 0xff00) === 0xff00) return true;
+  if (first === 0x2001 && h[1] === 0x0db8) return true;
+  if (first === 0x0100 && h.slice(1, 4).every((x) => x === 0)) return true;
   return false;
 }
 
 export function isBlockedIp(address: string): boolean {
-  const clean = address.replace(/^\[|\]$/g, "");
+  const clean = stripBrackets(address);
   if (net.isIPv4(clean)) return isBlockedIpv4(clean);
   if (net.isIPv6(clean)) return isBlockedIpv6(clean);
   return false;
@@ -94,17 +111,57 @@ const BLOCKED_HOSTNAMES = new Set([
 
 export function assertPublicHostnameLiteral(hostname: string): void {
   const host = hostname.toLowerCase().replace(/\.$/, "");
-  if (
-    BLOCKED_HOSTNAMES.has(host) ||
-    host.endsWith(".localhost") ||
-    host.endsWith(".local") ||
-    host === "localhost."
-  ) {
+  if (BLOCKED_HOSTNAMES.has(host) || host.endsWith(".localhost") || host.endsWith(".local")) {
     throw new McpError(ErrorCodes.SsrfBlocked, "Blocked hostname");
   }
   if (isBlockedIp(host)) {
     throw new McpError(ErrorCodes.SsrfBlocked, "Blocked IP address");
   }
+}
+
+/** Resolve all A/AAAA records and reject if any is private/reserved. */
+export async function resolvePublicAddresses(
+  hostname: string,
+  lookupFn: LookupFn = dns.lookup,
+): Promise<ResolvedAddress[]> {
+  let records: ReadonlyArray<{ address: string; family: number }>;
+  try {
+    records = await lookupFn(hostname, { all: true, verbatim: true });
+  } catch {
+    throw new McpError(ErrorCodes.SsrfBlocked, "DNS resolution failed");
+  }
+  if (records.length === 0) {
+    throw new McpError(ErrorCodes.SsrfBlocked, "No DNS records");
+  }
+  if (records.some((rec) => isBlockedIp(rec.address))) {
+    throw new McpError(ErrorCodes.SsrfBlocked, "Host resolves to a blocked address");
+  }
+  return records.map((r) => ({ address: r.address, family: r.family }));
+}
+
+/**
+ * `net.connect` lookup that only yields validated public addresses, so the socket
+ * connects to exactly what was checked (no DNS-rebinding window).
+ */
+export function createPinnedLookup(lookupFn: LookupFn = dns.lookup): net.LookupFunction {
+  return (hostname, options, callback) => {
+    resolvePublicAddresses(hostname, lookupFn).then(
+      (records) => {
+        const family = typeof options.family === "number" ? options.family : 0;
+        const usable = family === 4 || family === 6 ? records.filter((r) => r.family === family) : records;
+        const first = usable[0];
+        if (!first) {
+          const err: NodeJS.ErrnoException = new Error(`No usable address for ${hostname}`);
+          err.code = "ENOTFOUND";
+          callback(err, "");
+          return;
+        }
+        if (options.all) callback(null, usable);
+        else callback(null, first.address, first.family);
+      },
+      (err: unknown) => callback(err as NodeJS.ErrnoException, ""),
+    );
+  };
 }
 
 /**
@@ -115,38 +172,12 @@ export async function assertSafeHttpUrl(
   raw: string,
   lookupFn: LookupFn = dns.lookup,
 ): Promise<URL> {
-  let url: URL;
-  try {
-    url = new URL(raw);
-  } catch {
-    throw new McpError(ErrorCodes.InvalidParams, "Invalid URL");
-  }
-  if (url.protocol !== "http:" && url.protocol !== "https:") {
-    throw new McpError(ErrorCodes.SsrfBlocked, "Only http(s) schemes allowed");
-  }
+  const url = assertPublicHttpUrl(raw);
   if (url.username || url.password) {
     throw new McpError(ErrorCodes.SsrfBlocked, "URLs with credentials are blocked");
   }
-
-  assertPublicHostnameLiteral(url.hostname);
-
-  if (net.isIP(url.hostname.replace(/^\[|\]$/g, ""))) {
-    return url;
-  }
-
-  let records: ReadonlyArray<{ address: string; family: number }>;
-  try {
-    records = await lookupFn(url.hostname, { all: true, verbatim: true });
-  } catch {
-    throw new McpError(ErrorCodes.SsrfBlocked, "DNS resolution failed");
-  }
-  if (records.length === 0) {
-    throw new McpError(ErrorCodes.SsrfBlocked, "No DNS records");
-  }
-  for (const rec of records) {
-    if (isBlockedIp(rec.address)) {
-      throw new McpError(ErrorCodes.SsrfBlocked, "Host resolves to a blocked address");
-    }
+  if (!net.isIP(stripBrackets(url.hostname))) {
+    await resolvePublicAddresses(url.hostname, lookupFn);
   }
   return url;
 }

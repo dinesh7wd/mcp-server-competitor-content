@@ -27,4 +27,4 @@ Cursor agent rules. Follow on every change.
 
 ## Testing
 - Mock all HTTP, SERP, and headless. Use fixtures including thin SPA HTML.
-- ≥80% branch coverage engines + services.
+- ≥80% statements/branches/functions/lines over src/ (excluding src/index.ts and src/types).

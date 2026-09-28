@@ -1,10 +1,10 @@
 import type { ScrapedPage } from "../infrastructure/contentFetcher.js";
 
+/** Summary projection without body text (full text is only available via scrape_page). */
 export interface CleanContent {
   readonly title: string;
   readonly metaDescription: string;
   readonly headings: readonly { level: number; text: string }[];
-  readonly bodyText: string;
   readonly wordCount: number;
 }
 
@@ -14,7 +14,6 @@ export function toCleanContent(page: ScrapedPage): CleanContent {
     title: page.title,
     metaDescription: page.metaDescription,
     headings: page.headings,
-    bodyText: page.bodyText,
     wordCount: page.wordCount,
   };
 }

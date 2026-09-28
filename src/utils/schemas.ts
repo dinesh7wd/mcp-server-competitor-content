@@ -1,25 +1,43 @@
 import { z } from "zod";
 
-const urlField = z
-  .string()
-  .url()
-  .refine((u) => u.startsWith("http://") || u.startsWith("https://"), {
-    message: "Only http(s) URLs are allowed",
-  })
-  .describe("Public http(s) URL to fetch (private/localhost targets are blocked)");
+/** Fresh instance per use: shared Zod instances become `$ref`s in the generated JSON Schema. */
+function urlField(
+  description = "Public http(s) URL to fetch (private/localhost targets are blocked)",
+): z.ZodEffects<z.ZodString, string, string> {
+  return z
+    .string()
+    .url()
+    .refine((u) => u.startsWith("http://") || u.startsWith("https://"), {
+      message: "Only http(s) URLs are allowed",
+    })
+    .describe(description);
+}
+
+export const DEFAULT_SCRAPE_MAX_CHARS = 20_000;
 
 export const scrapePageInputSchema = z.object({
-  url: urlField,
+  url: urlField(),
   forceHeadless: z
     .boolean()
     .default(false)
     .describe("Force Playwright render instead of plain HTTP fetch"),
+  maxChars: z
+    .number()
+    .int()
+    .min(500)
+    .max(100_000)
+    .default(DEFAULT_SCRAPE_MAX_CHARS)
+    .describe("Maximum bodyText characters to return (response sets truncated=true when cut)"),
 });
 
 export const extractKeywordsInputSchema = z
   .object({
-    url: urlField.optional().describe("Page URL to scrape for keyword extraction"),
-    text: z.string().min(20).optional().describe("Raw text to analyze instead of a URL"),
+    url: urlField("Page URL to scrape for keyword extraction (provide url or text, not both)").optional(),
+    text: z
+      .string()
+      .min(20)
+      .optional()
+      .describe("Raw text to analyze instead of a URL (provide url or text, not both)"),
     topK: z
       .number()
       .int()
@@ -38,17 +56,17 @@ export const contentGapInputSchema = z.object({
   yourContent: z
     .union([
       z.object({
-        type: z.literal("url"),
-        value: urlField,
+        type: z.literal("url").describe("Fetch your content from a URL"),
+        value: urlField("URL of your page"),
       }),
       z.object({
-        type: z.literal("raw_text"),
+        type: z.literal("raw_text").describe("Use the supplied text as your content"),
         value: z.string().min(50).describe("Your article text"),
       }),
     ])
     .describe("Your content as a URL or raw text"),
   competitorUrls: z
-    .array(urlField)
+    .array(urlField("Competitor page URL"))
     .min(1)
     .max(10)
     .describe("Competitor page URLs (failed URLs return in errors, others still process)"),
@@ -56,7 +74,7 @@ export const contentGapInputSchema = z.object({
 
 export const compareHeadingsInputSchema = z.object({
   urls: z
-    .array(urlField)
+    .array(urlField("Page URL whose heading outline to list"))
     .min(2)
     .max(10)
     .describe("URLs whose heading outlines to compare"),
@@ -64,8 +82,12 @@ export const compareHeadingsInputSchema = z.object({
 
 export const readabilityInputSchema = z
   .object({
-    url: urlField.optional().describe("Page URL to score"),
-    text: z.string().min(50).optional().describe("Raw text to score"),
+    url: urlField("Page URL to score (provide url or text, not both)").optional(),
+    text: z
+      .string()
+      .min(50)
+      .optional()
+      .describe("Raw text to score (provide url or text, not both)"),
   })
   .superRefine((v, ctx) => {
     if ((v.url === undefined) === (v.text === undefined)) {
@@ -74,7 +96,7 @@ export const readabilityInputSchema = z
   });
 
 export const qualityInputSchema = z.object({
-  url: urlField.describe("Page URL to score for on-page content quality"),
+  url: urlField("Page URL to score for on-page content quality"),
 });
 
 export const serpFeaturesInputSchema = z.object({
@@ -89,7 +111,7 @@ export const serpFeaturesInputSchema = z.object({
 
 export const clusterCompetitorsInputSchema = z.object({
   urls: z
-    .array(urlField)
+    .array(urlField("Competitor page URL"))
     .min(2)
     .max(20)
     .describe("Competitor URLs to cluster by content similarity"),
@@ -99,7 +121,7 @@ export const clusterCompetitorsInputSchema = z.object({
     .min(2)
     .max(10)
     .default(3)
-    .describe("Number of clusters"),
+    .describe("Number of clusters (fewer are returned when pages are near-duplicates)"),
 });
 
 export type ContentGapInput = z.infer<typeof contentGapInputSchema>;

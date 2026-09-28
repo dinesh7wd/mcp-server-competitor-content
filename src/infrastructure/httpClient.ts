@@ -1,7 +1,9 @@
+import dns from "node:dns/promises";
+import { Agent, fetch as undiciFetch } from "undici";
 import { ErrorCodes, McpError } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
 import { redactSecrets, safeUrlForLog } from "../utils/redact.js";
-import { assertSafeHttpUrl } from "../utils/validators.js";
+import { assertSafeHttpUrl, createPinnedLookup, type LookupFn } from "../utils/validators.js";
 
 export interface HttpRequest {
   readonly url: string;
@@ -14,6 +16,8 @@ export interface HttpRequest {
   readonly validateRedirects?: boolean;
   readonly maxRedirects?: number;
   readonly maxBodyBytes?: number;
+  /** When true, bodies over maxBodyBytes are cut instead of rejected. */
+  readonly truncateBody?: boolean;
   readonly allowedContentTypes?: readonly string[];
 }
 
@@ -27,13 +31,80 @@ export interface HttpResponse {
 
 export interface HttpClient {
   request(req: HttpRequest): Promise<HttpResponse>;
+  close?(): Promise<void>;
 }
+
+export interface FetchInit {
+  readonly method: string;
+  readonly redirect: "manual";
+  readonly signal: AbortSignal;
+  readonly headers?: Readonly<Record<string, string>>;
+  readonly body?: string;
+}
+
+export interface FetchResponseLike {
+  readonly status: number;
+  readonly headers: { forEach(cb: (value: string, key: string) => void): void };
+  readonly body: ReadableStream<Uint8Array> | null;
+}
+
+export type FetchLike = (url: string, init: FetchInit) => Promise<FetchResponseLike>;
+
+export interface HttpClientOptions {
+  readonly timeoutMs?: number;
+  readonly retries?: number;
+  /** DNS resolver used for both pre-flight validation and the pinned socket lookup. */
+  readonly lookup?: LookupFn;
+  /** Test seam; the default is undici fetch through a pinned-lookup Agent. */
+  readonly fetchImpl?: FetchLike;
+}
+
+interface HopState {
+  url: string;
+  redirects: number;
+  method: "GET" | "POST";
+  body: string | undefined;
+}
+
+interface ClientDeps {
+  readonly lookup: LookupFn;
+  readonly fetchImpl: FetchLike;
+}
+
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+const DEFAULT_MAX_BODY_BYTES = 2 * 1024 * 1024;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-function normalizeHeaders(headers: Headers): Record<string, string> {
+function abortError(): Error {
+  return new DOMException("The operation was aborted", "AbortError");
+}
+
+/** DNS lookups ignore AbortSignal; race them so the request timeout still applies. */
+function raceAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => reject(abortError());
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (v) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(v);
+      },
+      (e: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(e);
+      },
+    );
+  });
+}
+
+function normalizeHeaders(headers: FetchResponseLike["headers"]): Record<string, string> {
   const result: Record<string, string> = {};
   headers.forEach((v, k) => {
     result[k.toLowerCase()] = v;
@@ -41,30 +112,31 @@ function normalizeHeaders(headers: Headers): Record<string, string> {
   return result;
 }
 
-async function readLimitedBody(response: Response, maxBytes: number): Promise<string> {
-  if (!response.body) return "";
-  const reader = response.body.getReader();
+async function readLimitedBody(
+  body: FetchResponseLike["body"],
+  maxBytes: number,
+  truncate: boolean,
+): Promise<string> {
+  if (!body) return "";
+  const reader = body.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
-    if (value) {
-      total += value.byteLength;
-      if (total > maxBytes) {
-        await reader.cancel().catch(() => undefined);
+    if (total + value.byteLength > maxBytes) {
+      await reader.cancel().catch(() => undefined);
+      if (!truncate) {
         throw new McpError(ErrorCodes.ScrapeFail, `Response exceeded ${maxBytes} byte limit`);
       }
-      chunks.push(value);
+      chunks.push(value.subarray(0, maxBytes - total));
+      total = maxBytes;
+      break;
     }
+    total += value.byteLength;
+    chunks.push(value);
   }
-  const combined = new Uint8Array(total);
-  let offset = 0;
-  for (const c of chunks) {
-    combined.set(c, offset);
-    offset += c.byteLength;
-  }
-  return new TextDecoder("utf-8", { fatal: false }).decode(combined);
+  return new TextDecoder("utf-8", { fatal: false }).decode(Buffer.concat(chunks, total));
 }
 
 function contentTypeAllowed(
@@ -76,122 +148,159 @@ function contentTypeAllowed(
   const base = contentType.split(";")[0]?.trim().toLowerCase() ?? "";
   return allowed.some((a) => {
     const want = a.toLowerCase();
-    return base === want || base.startsWith(`${want}+`) || base.includes(want);
+    return base === want || base.startsWith(`${want}+`);
   });
 }
 
-async function fetchOnce(
-  url: string,
-  req: HttpRequest,
-  signal: AbortSignal,
-): Promise<{ status: number; headers: Record<string, string>; body: string }> {
-  const init: RequestInit = {
-    method: req.method ?? "GET",
-    signal,
+function buildInit(state: HopState, req: HttpRequest, signal: AbortSignal): FetchInit {
+  return {
+    method: state.method,
     redirect: "manual",
+    signal,
+    ...(req.headers ? { headers: req.headers } : {}),
+    ...(state.body !== undefined ? { body: state.body } : {}),
   };
-  if (req.headers) init.headers = req.headers;
-  if (req.body) init.body = req.body;
-
-  const res = await fetch(url, init);
-  const headers = normalizeHeaders(res.headers);
-  const maxBytes = req.maxBodyBytes ?? 2 * 1024 * 1024;
-  const isRedirect = [301, 302, 303, 307, 308].includes(res.status);
-  const body = isRedirect ? "" : await readLimitedBody(res, maxBytes);
-  return { status: res.status, headers, body };
 }
 
-export function createHttpClient(defaults?: {
-  timeoutMs?: number;
-  retries?: number;
-}): HttpClient {
-  const defaultTimeout = defaults?.timeoutMs ?? 10_000;
-  const defaultRetries = defaults?.retries ?? 2;
+function advanceRedirect(
+  state: HopState,
+  status: number,
+  location: string | undefined,
+  maxRedirects: number,
+): void {
+  if (!location) throw new McpError(ErrorCodes.ScrapeFail, "Redirect without Location header");
+  let next: string;
+  try {
+    next = new URL(location, state.url).href;
+  } catch {
+    throw new McpError(ErrorCodes.ScrapeFail, "Invalid redirect Location header");
+  }
+  if (state.redirects >= maxRedirects) {
+    throw new McpError(ErrorCodes.ScrapeFail, `Exceeded ${maxRedirects} redirects`);
+  }
+  state.redirects += 1;
+  state.url = next;
+  if (status === 303 || ((status === 301 || status === 302) && state.method === "POST")) {
+    state.method = "GET";
+    state.body = undefined;
+  }
+}
+
+async function finishResponse(
+  res: FetchResponseLike,
+  headers: Record<string, string>,
+  state: HopState,
+  req: HttpRequest,
+): Promise<HttpResponse> {
+  const ok = res.status >= 200 && res.status < 300;
+  if (ok && !contentTypeAllowed(headers["content-type"], req.allowedContentTypes)) {
+    await res.body?.cancel().catch(() => undefined);
+    throw new McpError(
+      ErrorCodes.ScrapeFail,
+      `Disallowed content-type: ${headers["content-type"] ?? "missing"}`,
+    );
+  }
+  const maxBytes = req.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
+  const body = await readLimitedBody(res.body, maxBytes, req.truncateBody === true);
+  return { status: res.status, body, headers, finalUrl: state.url, redirectCount: state.redirects };
+}
+
+async function followRedirects(
+  state: HopState,
+  req: HttpRequest,
+  signal: AbortSignal,
+  deps: ClientDeps,
+): Promise<HttpResponse> {
+  const maxRedirects = req.maxRedirects ?? 5;
+  const validate = req.validateRedirects !== false;
+  for (;;) {
+    if (validate) await raceAbort(assertSafeHttpUrl(state.url, deps.lookup), signal);
+    const res = await deps.fetchImpl(state.url, buildInit(state, req, signal));
+    const headers = normalizeHeaders(res.headers);
+    if (!REDIRECT_STATUSES.has(res.status)) return finishResponse(res, headers, state, req);
+    await res.body?.cancel().catch(() => undefined);
+    advanceRedirect(state, res.status, headers.location, maxRedirects);
+  }
+}
+
+function errorCause(err: unknown): unknown {
+  return err instanceof Error ? err.cause : undefined;
+}
+
+/** Errors that must not be retried. */
+function fatalError(err: unknown, url: string): McpError | undefined {
+  if (err instanceof McpError) return err;
+  const cause = errorCause(err);
+  if (cause instanceof McpError) return cause;
+  if (err instanceof Error && (err.name === "AbortError" || err.name === "TimeoutError")) {
+    return new McpError(ErrorCodes.Timeout, `Timeout: ${safeUrlForLog(url)}`);
+  }
+  return undefined;
+}
+
+function networkFailure(err: unknown, url: string): McpError {
+  const cause = errorCause(err);
+  const code =
+    cause && typeof cause === "object" && "code" in cause && typeof cause.code === "string"
+      ? cause.code
+      : err instanceof Error
+        ? redactSecrets(err.message)
+        : "unknown";
+  return new McpError(ErrorCodes.ScrapeFail, `Network error (${code}) for ${safeUrlForLog(url)}`);
+}
+
+function shouldRetryStatus(status: number): boolean {
+  return status === 429 || status >= 500;
+}
+
+function defaultFetch(lookup: LookupFn): { fetchImpl: FetchLike; agent: Agent } {
+  const agent = new Agent({ connect: { lookup: createPinnedLookup(lookup) } });
+  const fetchImpl: FetchLike = (url, init) => undiciFetch(url, { ...init, dispatcher: agent });
+  return { fetchImpl, agent };
+}
+
+export function createHttpClient(options: HttpClientOptions = {}): HttpClient {
+  const defaultTimeout = options.timeoutMs ?? 10_000;
+  const defaultRetries = options.retries ?? 2;
+  const lookup = options.lookup ?? dns.lookup;
+  const pinned = options.fetchImpl ? undefined : defaultFetch(lookup);
+  const fetchImpl = options.fetchImpl ?? pinned?.fetchImpl;
+  if (!fetchImpl) throw new Error("fetch implementation unavailable");
+  const deps: ClientDeps = { lookup, fetchImpl };
 
   return {
     async request(req: HttpRequest): Promise<HttpResponse> {
-      const validateRedirects = req.validateRedirects !== false;
-      const maxRedirects = req.maxRedirects ?? 5;
       const timeoutMs = req.timeoutMs ?? defaultTimeout;
-      const retries = req.retries ?? defaultRetries;
-      let currentUrl = req.url;
-      let redirectCount = 0;
+      const attempts = (req.retries ?? defaultRetries) + 1;
+      const state: HopState = {
+        url: req.url,
+        redirects: 0,
+        method: req.method ?? "GET",
+        body: req.body,
+      };
       let lastErr: unknown;
-      const attempts = retries + 1;
 
       for (let i = 0; i < attempts; i += 1) {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), timeoutMs);
         try {
-          while (redirectCount <= maxRedirects) {
-            if (validateRedirects) {
-              await assertSafeHttpUrl(currentUrl);
-            }
-            const result = await fetchOnce(currentUrl, req, controller.signal);
-
-            if ([301, 302, 303, 307, 308].includes(result.status)) {
-              const location = result.headers.location;
-              if (!location) {
-                throw new McpError(ErrorCodes.ScrapeFail, "Redirect without Location header");
-              }
-              currentUrl = new URL(location, currentUrl).href;
-              redirectCount += 1;
-              if (validateRedirects) {
-                await assertSafeHttpUrl(currentUrl);
-              }
-              continue;
-            }
-
-            if (
-              req.allowedContentTypes &&
-              result.status >= 200 &&
-              result.status < 300 &&
-              !contentTypeAllowed(result.headers["content-type"], req.allowedContentTypes)
-            ) {
-              throw new McpError(
-                ErrorCodes.ScrapeFail,
-                `Disallowed content-type: ${result.headers["content-type"] ?? "missing"}`,
-              );
-            }
-
-            if ((result.status === 429 || result.status >= 500) && i < attempts - 1) {
-              logger.warn("http_retry", {
-                url: safeUrlForLog(currentUrl),
-                status: result.status,
-                attempt: i,
-              });
-              await sleep(200 * 2 ** i);
-              break;
-            }
-
-            return {
-              status: result.status,
-              body: result.body,
-              headers: result.headers,
-              finalUrl: currentUrl,
-              redirectCount,
-            };
-          }
-          if (redirectCount > maxRedirects) {
-            throw new McpError(ErrorCodes.ScrapeFail, `Exceeded ${maxRedirects} redirects`);
-          }
+          const res = await followRedirects(state, req, controller.signal, deps);
+          if (!shouldRetryStatus(res.status) || i === attempts - 1) return res;
+          logger.warn("http_retry", { url: safeUrlForLog(state.url), status: res.status, attempt: i });
         } catch (err) {
+          const fatal = fatalError(err, state.url);
+          if (fatal) throw fatal;
           lastErr = err;
-          if (err instanceof McpError) throw err;
-          if (err instanceof Error && err.name === "AbortError") {
-            throw new McpError(ErrorCodes.Timeout, `Timeout: ${safeUrlForLog(currentUrl)}`);
-          }
-          if (i < attempts - 1) {
-            await sleep(200 * 2 ** i);
-            continue;
-          }
+          if (i === attempts - 1) break;
         } finally {
           clearTimeout(timer);
         }
+        await sleep(200 * 2 ** i);
       }
-      const msg =
-        lastErr instanceof Error ? redactSecrets(lastErr.message) : "HTTP failed";
-      throw new McpError(ErrorCodes.InternalError, msg);
+      throw networkFailure(lastErr, state.url);
+    },
+    async close(): Promise<void> {
+      await pinned?.agent.close();
     },
   };
 }

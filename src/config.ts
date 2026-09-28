@@ -16,7 +16,7 @@ const envSchema = z.object({
   USER_AGENT: z
     .string()
     .default(
-      "mcp-server-competitor-content/1.0 (+https://github.com/dinesh7wd/mcp-server-competitor-content)",
+      "mcp-server-competitor-content/1.1 (+https://github.com/dinesh7wd/mcp-server-competitor-content)",
     ),
   SERP_PROVIDER: z.enum(["serpapi"]).optional(),
   SERP_API_KEY: z.string().min(1).optional(),

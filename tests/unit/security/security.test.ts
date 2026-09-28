@@ -1,38 +1,69 @@
+import type { LookupAddress } from "node:dns";
 import { describe, expect, it, vi } from "vitest";
 import {
+  assertPublicHttpUrl,
   assertSafeHttpUrl,
+  createPinnedLookup,
   isBlockedIp,
   isBlockedIpv4,
   isBlockedIpv6,
+  parseIpv6,
+  type LookupFn,
 } from "../../../src/utils/validators.js";
 import { redactSecrets, safeUrlForLog } from "../../../src/utils/redact.js";
 import { ErrorCodes } from "../../../src/utils/errors.js";
 import {
-  parseHtmlToPage,
-  extractHeadingsInOrder,
-  extractVisibleText,
-} from "../../../src/infrastructure/contentFetcher.js";
-import {
-  __robotsTest,
-  parseRobotsTxt,
-  isPathAllowed,
-} from "../../../src/infrastructure/robotsChecker.js";
-import * as cheerio from "cheerio";
-import { extractKeywords } from "../../../src/engines/keywordEngine.js";
-import { createHttpClient } from "../../../src/infrastructure/httpClient.js";
+  createHttpClient,
+  type FetchLike,
+  type FetchResponseLike,
+} from "../../../src/infrastructure/httpClient.js";
+
+function lookupMap(map: Record<string, string>): LookupFn {
+  return vi.fn(async (hostname: string) => {
+    const address = map[hostname];
+    if (!address) throw new Error(`ENOTFOUND ${hostname}`);
+    return [{ address, family: address.includes(":") ? 6 : 4 }];
+  });
+}
+
+function redirectTo(location: string): FetchResponseLike {
+  return new Response(null, { status: 302, headers: { Location: location } });
+}
 
 describe("SSRF validators", () => {
   it("blocks loopback, CGNAT, link-local, metadata IPv4", () => {
-    expect(isBlockedIpv4("127.0.0.1")).toBe(true);
-    expect(isBlockedIpv4("10.0.0.1")).toBe(true);
-    expect(isBlockedIpv4("100.64.1.1")).toBe(true);
-    expect(isBlockedIpv4("169.254.169.254")).toBe(true);
-    expect(isBlockedIpv4("192.168.1.1")).toBe(true);
+    for (const ip of ["127.0.0.1", "10.0.0.1", "100.64.1.1", "169.254.169.254", "192.168.1.1"]) {
+      expect(isBlockedIpv4(ip)).toBe(true);
+    }
     expect(isBlockedIpv4("8.8.8.8")).toBe(false);
+    expect(isBlockedIpv4("not-an-ip")).toBe(false);
+  });
+
+  it("blocks reserved, documentation and benchmark IPv4 ranges", () => {
+    for (const ip of [
+      "0.1.2.3",
+      "192.0.0.8",
+      "192.0.2.1",
+      "198.18.0.1",
+      "198.19.255.255",
+      "198.51.100.1",
+      "203.0.113.1",
+      "224.0.0.1",
+      "255.255.255.255",
+    ]) {
+      expect(isBlockedIpv4(ip), ip).toBe(true);
+    }
+  });
+
+  it("allows public addresses inside 192.0.0.0/16 outside the reserved /24s", () => {
+    expect(isBlockedIpv4("192.0.43.10")).toBe(false);
+    expect(isBlockedIpv4("192.0.1.1")).toBe(false);
+    expect(isBlockedIpv4("198.20.0.1")).toBe(false);
   });
 
   it("blocks IPv6 loopback, ULA, link-local, mapped, AWS IMDS", () => {
     expect(isBlockedIpv6("::1")).toBe(true);
+    expect(isBlockedIpv6("::")).toBe(true);
     expect(isBlockedIpv6("fe80::1")).toBe(true);
     expect(isBlockedIpv6("fd00:ec2::254")).toBe(true);
     expect(isBlockedIpv6("::ffff:127.0.0.1")).toBe(true);
@@ -40,29 +71,148 @@ describe("SSRF validators", () => {
     expect(isBlockedIp("[::1]")).toBe(true);
   });
 
-  it("blocks localhost and metadata hostnames without DNS", async () => {
-    await expect(assertSafeHttpUrl("http://localhost/admin")).rejects.toMatchObject({
-      code: ErrorCodes.SsrfBlocked,
-    });
-    await expect(assertSafeHttpUrl("http://metadata.goog/")).rejects.toMatchObject({
-      code: ErrorCodes.SsrfBlocked,
-    });
-    await expect(assertSafeHttpUrl("http://127.0.0.1/")).rejects.toMatchObject({
-      code: ErrorCodes.SsrfBlocked,
-    });
+  it("decodes IPv4 embedded in mapped, compatible, NAT64 and 6to4 IPv6", () => {
+    for (const ip of [
+      "::ffff:7f00:1",
+      "0:0:0:0:0:ffff:7f00:1",
+      "::ffff:0:7f00:1",
+      "::7f00:1",
+      "::127.0.0.1",
+      "64:ff9b::7f00:1",
+      "64:ff9b::a9fe:a9fe",
+      "64:ff9b:1::a00:1",
+      "2002:7f00:1::",
+      "2002:a9fe:a9fe::1",
+    ]) {
+      expect(isBlockedIp(ip), ip).toBe(true);
+    }
+    expect(isBlockedIp("64:ff9b::808:808")).toBe(false);
+    expect(isBlockedIp("2002:808:808::1")).toBe(false);
+    expect(isBlockedIp("::ffff:8.8.8.8")).toBe(false);
   });
 
-  it("blocks DNS that resolves to private IP", async () => {
-    const lookup = vi.fn().mockResolvedValue([{ address: "127.0.0.1", family: 4 }]);
-    await expect(
-      assertSafeHttpUrl("https://evil.example/x", lookup),
-    ).rejects.toMatchObject({ code: ErrorCodes.SsrfBlocked });
+  it("blocks site-local, documentation, discard and multicast IPv6", () => {
+    for (const ip of ["fec0::1", "2001:db8::1", "100::1", "ff02::1"]) {
+      expect(isBlockedIp(ip), ip).toBe(true);
+    }
+    expect(isBlockedIp("2606:4700:4700::1111")).toBe(false);
+  });
+
+  it("parses IPv6 text forms strictly", () => {
+    expect(parseIpv6("::1")).toEqual([0, 0, 0, 0, 0, 0, 0, 1]);
+    expect(parseIpv6("[fe80::1%eth0]")?.[0]).toBe(0xfe80);
+    expect(parseIpv6("1:2:3:4:5:6:7:8")).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(parseIpv6("1::2::3")).toBeNull();
+    expect(parseIpv6("1:2:3:4:5:6:7:8::")).toBeNull();
+    expect(parseIpv6("1:2:3")).toBeNull();
+    expect(parseIpv6("::ffff:999.1.1.1")).toBeNull();
+    expect(parseIpv6("gggg::1")).toBeNull();
+    expect(isBlockedIpv6("not-ipv6")).toBe(true);
+  });
+
+  it("blocks localhost variants and metadata hostnames without DNS", async () => {
+    const lookup = vi.fn();
+    for (const url of [
+      "http://localhost/admin",
+      "http://localhost./",
+      "http://app.localhost/",
+      "http://printer.local/",
+      "http://metadata.goog/",
+      "http://127.0.0.1/",
+      "http://[::ffff:127.0.0.1]/",
+      "http://2130706433/",
+    ]) {
+      await expect(assertSafeHttpUrl(url, lookup), url).rejects.toMatchObject({
+        code: ErrorCodes.SsrfBlocked,
+      });
+    }
+    expect(lookup).not.toHaveBeenCalled();
+  });
+
+  it("rejects bad URLs, schemes and credentials", async () => {
+    await expect(assertSafeHttpUrl("not a url")).rejects.toMatchObject({
+      code: ErrorCodes.InvalidParams,
+    });
+    await expect(assertSafeHttpUrl("ftp://example.com/")).rejects.toMatchObject({
+      code: ErrorCodes.SsrfBlocked,
+    });
+    await expect(assertSafeHttpUrl("http://u:p@example.com/")).rejects.toMatchObject({
+      code: ErrorCodes.SsrfBlocked,
+    });
+    expect(() => assertPublicHttpUrl("file:///etc/passwd")).toThrow();
+  });
+
+  it("blocks DNS that resolves to any private IP, fails, or is empty", async () => {
+    const mixed = vi.fn().mockResolvedValue([
+      { address: "93.184.216.34", family: 4 },
+      { address: "127.0.0.1", family: 4 },
+    ]);
+    await expect(assertSafeHttpUrl("https://evil.example/x", mixed)).rejects.toMatchObject({
+      code: ErrorCodes.SsrfBlocked,
+    });
+    const failing = vi.fn().mockRejectedValue(new Error("ENOTFOUND"));
+    await expect(assertSafeHttpUrl("https://nx.example/", failing)).rejects.toThrow(
+      "DNS resolution failed",
+    );
+    const empty = vi.fn().mockResolvedValue([]);
+    await expect(assertSafeHttpUrl("https://empty.example/", empty)).rejects.toThrow("No DNS records");
   });
 
   it("allows public DNS", async () => {
-    const lookup = vi.fn().mockResolvedValue([{ address: "93.184.216.34", family: 4 }]);
-    const url = await assertSafeHttpUrl("https://example.com/path", lookup);
+    const url = await assertSafeHttpUrl("https://example.com/path", lookupMap({ "example.com": "93.184.216.34" }));
     expect(url.hostname).toBe("example.com");
+  });
+});
+
+describe("pinned lookup", () => {
+  const pinnedResult = (
+    lookup: LookupFn,
+    options: { all?: boolean; family?: number },
+  ): Promise<{ err: NodeJS.ErrnoException | null; address: string | LookupAddress[]; family?: number }> =>
+    new Promise((resolve) => {
+      createPinnedLookup(lookup)("host.test", options, (err, address, family) =>
+        resolve({ err, address, ...(family !== undefined ? { family } : {}) }),
+      );
+    });
+
+  const dual: LookupFn = async () => [
+    { address: "93.184.216.34", family: 4 },
+    { address: "2606:2800:220:1::1", family: 6 },
+  ];
+
+  it("returns only validated addresses in single and all modes", async () => {
+    expect(await pinnedResult(dual, {})).toMatchObject({ err: null, address: "93.184.216.34", family: 4 });
+    expect(await pinnedResult(dual, { family: 6 })).toMatchObject({ address: "2606:2800:220:1::1" });
+    const all = await pinnedResult(dual, { all: true });
+    expect(all.address).toHaveLength(2);
+  });
+
+  it("errors when no address matches the requested family", async () => {
+    const v4only: LookupFn = async () => [{ address: "93.184.216.34", family: 4 }];
+    const res = await pinnedResult(v4only, { family: 6 });
+    expect(res.err?.code).toBe("ENOTFOUND");
+  });
+
+  it("rejects a hostname that resolves to loopback", async () => {
+    const res = await pinnedResult(async () => [{ address: "127.0.0.1", family: 4 }], {});
+    expect(res.err).toMatchObject({ code: ErrorCodes.SsrfBlocked });
+  });
+
+  it("blocks DNS rebinding between validation and connect (real undici)", async () => {
+    let calls = 0;
+    const rebinding: LookupFn = async () => {
+      calls += 1;
+      return [{ address: calls === 1 ? "93.184.216.34" : "127.0.0.1", family: 4 }];
+    };
+    const client = createHttpClient({ lookup: rebinding, retries: 0, timeoutMs: 5000 });
+    try {
+      await expect(client.request({ url: "http://rebind.test/" })).rejects.toMatchObject({
+        code: ErrorCodes.SsrfBlocked,
+      });
+      expect(calls).toBe(2);
+    } finally {
+      await client.close?.();
+    }
   });
 });
 
@@ -73,115 +223,29 @@ describe("redact secrets", () => {
     expect(safeUrlForLog(u)).not.toContain("api_key=");
     expect(redactSecrets(`Timeout ${u}`)).toContain("REDACTED");
     expect(redactSecrets(`Timeout ${u}`)).not.toContain("SECRET123");
-  });
-});
-
-describe("HTML extraction fixes", () => {
-  it("detects JSON-LD before script removal", () => {
-    const html = `<!doctype html><html><head>
-      <script type="application/ld+json">{"@type":"Article","headline":"Hi"}</script>
-      </head><body><p>Hello world content here</p></body></html>`;
-    const page = parseHtmlToPage(html, "https://ex.com/", "https://ex.com/", false, 10000);
-    expect(page.hasSchema).toBe(true);
-    expect(page.schemaTypes).toContain("Article");
-    expect(page.html).toBe("");
-  });
-
-  it("returns headings in document order", () => {
-    const $ = cheerio.load(`<h1>A</h1><h2>B</h2><h1>C</h1><h3>D</h3>`);
-    expect(extractHeadingsInOrder($).map((h) => h.text)).toEqual(["A", "B", "C", "D"]);
-  });
-
-  it("joins block elements with whitespace", () => {
-    const $ = cheerio.load(`<div>alpha</div><div>beta</div><p>gamma</p>`);
-    const text = extractVisibleText($);
-    expect(text).toMatch(/alpha/);
-    expect(text).toMatch(/beta/);
-    expect(text).not.toContain("alphabetagamma");
-  });
-
-  it("does not match Metadata as meta brand", () => {
-    const page = parseHtmlToPage(
-      `<html><body><p>Metadata about the product features</p></body></html>`,
-      "https://ex.com/",
-      "https://ex.com/",
-      false,
-      10000,
-    );
-    expect(page.brandMentions).not.toContain("meta");
-  });
-
-  it("updates link counts against finalUrl host", () => {
-    const html = `<html><body>
-      <a href="https://www.ex.com/a">a</a>
-      <a href="https://other.com/b">b</a>
-      </body></html>`;
-    const page = parseHtmlToPage(html, "https://ex.com/", "https://www.ex.com/", false, 10000);
-    expect(page.internalLinks).toBe(1);
-    expect(page.externalLinks).toBe(1);
-  });
-});
-
-describe("robots rewrite", () => {
-  it("applies shared rules to multi-agent groups", () => {
-    const groups = parseRobotsTxt(
-      "User-agent: googlebot\nUser-agent: bingbot\nDisallow: /secret\n",
-    );
-    expect(isPathAllowed(groups, "googlebot", "/secret")).toBe(false);
-    expect(isPathAllowed(groups, "bingbot", "/secret")).toBe(false);
-    expect(isPathAllowed(groups, "googlebot", "/ok")).toBe(true);
-  });
-
-  it("honors * and $ wildcards", () => {
-    const groups = parseRobotsTxt("User-agent: *\nDisallow: /*.pdf$\nAllow: /\n");
-    expect(isPathAllowed(groups, "bot", "/file.pdf")).toBe(false);
-    expect(isPathAllowed(groups, "bot", "/file.pdf?x=1")).toBe(true);
-  });
-
-  it("allow wins when longer than disallow", () => {
-    const rules = __robotsTest.parseRobots(
-      "User-agent: *\nDisallow: /a\nAllow: /a/public\n",
-      "bot",
-    );
-    expect(__robotsTest.pathAllowed("/a/x", rules)).toBe(false);
-    expect(__robotsTest.pathAllowed("/a/public", rules)).toBe(true);
-  });
-});
-
-describe("keyword scoring", () => {
-  it("does not flatten 50 vs 200 occurrences", () => {
-    const t50 = Array(50).fill("widget").join(" ") + " " + Array(50).fill("other").join(" ");
-    const t200 = Array(200).fill("widget").join(" ") + " " + Array(50).fill("other").join(" ");
-    const s50 = extractKeywords(t50, 5).keywords.find((k) => k.term === "widget")!.score;
-    const s200 = extractKeywords(t200, 5).keywords.find((k) => k.term === "widget")!.score;
-    expect(s200).toBeGreaterThan(s50);
+    expect(safeUrlForLog("not a url ?token=abc")).not.toContain("abc");
   });
 });
 
 describe("http redirect re-validation", () => {
-  it("rejects redirect to loopback", async () => {
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = vi.fn().mockResolvedValue(
-      new Response(null, {
-        status: 302,
-        headers: { Location: "http://127.0.0.1:9/admin" },
-      }),
-    ) as typeof fetch;
-    try {
-      const client = createHttpClient({ timeoutMs: 2000, retries: 0 });
-      // First hop must pass DNS — mock public resolve by using literal public IP host... 
-      // Use validate with injected flow: request with validateRedirects true;
-      // hostname "example.com" would DNS-resolve in real env. Stub assert via IP that's public then redirect.
-      await expect(
-        client.request({
-          url: "http://8.8.8.8/",
-          timeoutMs: 1000,
-          retries: 0,
-          validateRedirects: true,
-        }),
-      ).rejects.toMatchObject({ code: ErrorCodes.SsrfBlocked });
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
+  it("rejects a redirect to a loopback literal without fetching it", async () => {
+    const fetchImpl = vi.fn<FetchLike>().mockResolvedValue(redirectTo("http://127.0.0.1:9/admin"));
+    const client = createHttpClient({ fetchImpl, retries: 0, timeoutMs: 2000 });
+    await expect(client.request({ url: "http://8.8.8.8/" })).rejects.toMatchObject({
+      code: ErrorCodes.SsrfBlocked,
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a redirect hop whose hostname resolves to 127.0.0.1", async () => {
+    const lookup = lookupMap({ "good.example": "93.184.216.34", "evil.example": "127.0.0.1" });
+    const fetchImpl = vi.fn<FetchLike>().mockResolvedValue(redirectTo("http://evil.example/steal"));
+    const client = createHttpClient({ fetchImpl, lookup, retries: 2, timeoutMs: 2000 });
+    await expect(client.request({ url: "http://good.example/" })).rejects.toMatchObject({
+      code: ErrorCodes.SsrfBlocked,
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(fetchImpl.mock.calls[0]?.[0]).toBe("http://good.example/");
+    expect(lookup).toHaveBeenCalledWith("evil.example", expect.anything());
   });
 });

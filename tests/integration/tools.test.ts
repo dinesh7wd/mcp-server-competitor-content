@@ -19,7 +19,8 @@ function fakePage(over: Partial<ScrapedPage> = {}): ScrapedPage {
     ],
     bodyText:
       "Running shoes marathon cushioning training race day footwear research cadence durability stability shoes for long distances and beginners.",
-    html: "<html></html>",
+    textTruncated: false,
+    html: "",
     wordCount: 40,
     internalLinks: 3,
     externalLinks: 1,
@@ -40,12 +41,11 @@ describe("tools integration", () => {
   const serp: SerpProvider = {
     getSerpFeatures: vi.fn(async (query: string) => ({
       query,
-      organic: [{ title: "t", link: "https://x.com", snippet: "s" }],
+      organic: [{ position: 1, title: "t", link: "https://x.com", snippet: "s" }],
       peopleAlsoAsk: ["q1"],
       relatedSearches: ["r1"],
       hasVideoCarousel: false,
-      provider: "serpapi",
-      featuredSnippet: "answer",
+      provider: "serpapi" as const,
     })),
   };
   const config = loadConfig(process.env);

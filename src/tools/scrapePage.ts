@@ -5,7 +5,7 @@ export const scrapePageTool: ToolDefinition<typeof scrapePageInputSchema> = {
   name: "scrape_page",
   title: "Scrape page",
   description:
-    "Fetch and extract clean body text, document-order headings, meta, links, and JSON-LD schema from a public URL. Raw HTML is never returned. bodyText is wrapped as untrusted content.",
+    "Fetch and extract clean body text, document-order headings, meta, links, and JSON-LD schema from a public URL. Raw HTML is never returned. bodyText is capped at maxChars (truncated=true when cut) and wrapped as untrusted content.",
   schema: scrapePageInputSchema,
   annotations: {
     readOnlyHint: true,

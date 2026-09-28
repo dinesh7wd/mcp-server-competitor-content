@@ -20,19 +20,27 @@ export function safeUrlForLog(raw: string): string {
   }
 }
 
-/** Deep-redact string values in log extras. */
+const MAX_REDACT_DEPTH = 5;
+
+function redactValue(key: string, value: unknown, depth: number): unknown {
+  if (typeof value === "string") {
+    const k = key.toLowerCase();
+    return k.includes("url") || k.includes("href") ? safeUrlForLog(value) : redactSecrets(value);
+  }
+  if (value === null || typeof value !== "object") return value;
+  if (depth >= MAX_REDACT_DEPTH) return "[redacted: too deep]";
+  if (Array.isArray(value)) return value.map((v) => redactValue(key, v, depth + 1));
+  return redactExtra(value as Readonly<Record<string, unknown>>, depth + 1);
+}
+
+/** Recursively redact string values (objects and arrays) in log extras. */
 export function redactExtra(
   extra: Readonly<Record<string, unknown>>,
+  depth = 0,
 ): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(extra)) {
-    if (typeof v === "string") {
-      const key = k.toLowerCase();
-      if (key.includes("url") || key.includes("href")) out[k] = safeUrlForLog(v);
-      else out[k] = redactSecrets(v);
-    } else {
-      out[k] = v;
-    }
+    out[k] = redactValue(k, v, depth);
   }
   return out;
 }

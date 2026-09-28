@@ -6,8 +6,9 @@ export default defineConfig({
     setupFiles: ["./tests/setup.ts"],
     coverage: {
       provider: "v8",
-      include: ["src/engines/**", "src/services/**"],
-      thresholds: { branches: 80 },
+      include: ["src/**"],
+      exclude: ["src/index.ts", "src/types/**"],
+      thresholds: { branches: 80, statements: 80, lines: 80, functions: 80 },
     },
   },
 });
