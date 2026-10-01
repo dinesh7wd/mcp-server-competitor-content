@@ -100,7 +100,7 @@ Pages are decoded using the BOM, then the `Content-Type` charset, then a `<meta 
 
 ## Configuration
 
-Set env vars in your MCP client config; see `.env.example` for all of them. `NODE_ENV=production` hides unexpected internal error messages from clients (default `development` shows them).
+Set env vars in your MCP client config; see `.env.example` for all of them. `NODE_ENV` defaults to `production`, which hides unexpected internal error messages from clients; set `NODE_ENV=development` locally to see them.
 
 ## SERP
 

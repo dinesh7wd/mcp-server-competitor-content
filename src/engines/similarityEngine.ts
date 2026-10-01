@@ -3,6 +3,13 @@ import { buildIdf, tfidfVectorWithIdf, type IdfMap } from "./keywordEngine.js";
 export type TermVector = ReadonlyMap<string, number>;
 
 const DUPLICATE_EPSILON = 1e-9;
+/** Clustering keeps each document's heaviest terms only, so k-means cost does not grow with page size. */
+export const MAX_CLUSTER_VECTOR_TERMS = 2_000;
+
+export function topTerms(vector: TermVector, max = MAX_CLUSTER_VECTOR_TERMS): Map<string, number> {
+  if (vector.size <= max) return new Map(vector);
+  return new Map([...vector].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, max));
+}
 
 export function cosineSimilarity(a: TermVector, b: TermVector): number {
   let dot = 0;
@@ -91,10 +98,11 @@ function meanVector(group: readonly TermVector[]): Map<string, number> {
 
 /** K-means over precomputed TF-IDF vectors. Empty clusters are dropped and ids renumbered. */
 export function clusterVectors(
-  vectors: readonly TermVector[],
+  fullVectors: readonly TermVector[],
   k: number,
 ): readonly ClusterAssignment[] {
-  if (vectors.length === 0) return [];
+  if (fullVectors.length === 0) return [];
+  const vectors = fullVectors.map((v) => topTerms(v));
   const centroids: TermVector[] = pickSeeds(vectors, Math.min(k, vectors.length)).map(
     (i) => new Map(vectors[i]!),
   );

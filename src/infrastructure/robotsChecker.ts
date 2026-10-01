@@ -147,7 +147,10 @@ async function fetchRobots(
     });
     if (res.status >= 500) {
       logger.warn("robots_5xx_deny", { url: safeUrlForLog(robotsUrl), status: res.status });
-      return { verdict: { status: "deny_all", groups: [] }, ttlSeconds: config.robotsCacheTtlSeconds };
+      return {
+        verdict: { status: "deny_all", groups: [] },
+        ttlSeconds: Math.min(ROBOTS_UNREACHABLE_TTL_SECONDS, config.robotsCacheTtlSeconds),
+      };
     }
     const verdict: RobotsVerdict =
       res.status >= 400

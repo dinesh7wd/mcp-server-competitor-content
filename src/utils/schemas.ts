@@ -14,6 +14,8 @@ function urlField(
 }
 
 export const DEFAULT_SCRAPE_MAX_CHARS = 20_000;
+/** Upper bound for caller-supplied text, keeping tokenization and scoring cost bounded. */
+export const MAX_INPUT_TEXT_CHARS = 200_000;
 
 export const scrapePageInputSchema = z.object({
   url: urlField(),
@@ -36,6 +38,7 @@ export const extractKeywordsInputSchema = z
     text: z
       .string()
       .min(20)
+      .max(MAX_INPUT_TEXT_CHARS)
       .optional()
       .describe("Raw text to analyze instead of a URL (provide url or text, not both)"),
     topK: z
@@ -61,7 +64,7 @@ export const contentGapInputSchema = z.object({
       }),
       z.object({
         type: z.literal("raw_text").describe("Use the supplied text as your content"),
-        value: z.string().min(50).describe("Your article text"),
+        value: z.string().min(50).max(MAX_INPUT_TEXT_CHARS).describe("Your article text"),
       }),
     ])
     .describe("Your content as a URL or raw text"),
@@ -86,6 +89,7 @@ export const readabilityInputSchema = z
     text: z
       .string()
       .min(50)
+      .max(MAX_INPUT_TEXT_CHARS)
       .optional()
       .describe("Raw text to score (provide url or text, not both)"),
   })

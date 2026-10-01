@@ -29,7 +29,7 @@ const envSchema = z.object({
   HEADLESS_TIMEOUT_MS: z.coerce.number().int().positive().default(15000),
   MAX_BODY_BYTES: z.coerce.number().int().positive().default(2_000_000),
   MAX_TEXT_CHARS: z.coerce.number().int().positive().default(100_000),
-  NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
+  NODE_ENV: z.enum(["development", "production", "test"]).default("production"),
 });
 
 export interface AppConfig {

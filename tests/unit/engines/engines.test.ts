@@ -15,8 +15,11 @@ import {
   clusterTexts,
   clusterVectors,
   cosineSimilarity,
+  MAX_CLUSTER_VECTOR_TERMS,
   similarityFromTexts,
+  topTerms,
 } from "../../../src/engines/similarityEngine.js";
+import { countSyllables } from "../../../src/utils/textHelpers.js";
 import { diffHeadings, multiHeadingCompare } from "../../../src/engines/headingDiffEngine.js";
 import { scoreQuality } from "../../../src/engines/qualityEngine.js";
 import { toCleanContent } from "../../../src/engines/scraperEngine.js";
@@ -164,7 +167,27 @@ describe("other engines", () => {
     const r = scoreReadability(page.bodyText);
     expect(r.wordCount).toBeGreaterThan(20);
     expect(Number.isFinite(r.fleschReadingEase)).toBe(true);
-    expect(scoreReadability("").sentenceCount).toBe(1);
+    expect(scoreReadability("")).toMatchObject({ sentenceCount: 0, wordCount: 0, fleschReadingEase: 0 });
+  });
+
+  it("keeps readability scores in range for degenerate input (M11)", () => {
+    expect(scoreReadability("123 456 — 50% !!!")).toMatchObject({ wordCount: 0, fleschKincaidGrade: 0 });
+    const tiny = scoreReadability("Go. Run. Sit. Eat.");
+    expect(tiny.fleschReadingEase).toBeLessThanOrEqual(100);
+    expect(tiny.fleschKincaidGrade).toBeGreaterThanOrEqual(0);
+    expect(tiny.colemanLiau).toBeGreaterThanOrEqual(0);
+    const dense = scoreReadability(`${"incomprehensibility internationalization ".repeat(40)}end`);
+    expect(dense.fleschReadingEase).toBeGreaterThanOrEqual(0);
+    expect(countSyllables("50%")).toBe(0);
+    expect(countSyllables("table")).toBe(2);
+  });
+
+  it("caps clustering vectors to the heaviest terms", () => {
+    const big = new Map(Array.from({ length: MAX_CLUSTER_VECTOR_TERMS + 50 }, (_, i) => [`t${i}`, i] as const));
+    const capped = topTerms(big);
+    expect(capped.size).toBe(MAX_CLUSTER_VECTOR_TERMS);
+    expect(capped.has(`t${MAX_CLUSTER_VECTOR_TERMS + 49}`)).toBe(true);
+    expect(capped.has("t0")).toBe(false);
   });
 
   it("diffs and lists headings", () => {

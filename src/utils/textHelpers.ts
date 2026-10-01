@@ -16,6 +16,11 @@ export function tokenize(text: string): string[] {
     .filter((t) => t.length > 2 && !isStopword(t));
 }
 
+/** Whitespace-separated tokens that contain at least one letter (numbers and symbols are not words). */
+export function words(text: string): string[] {
+  return text.split(/\s+/).filter((t) => /[a-z]/i.test(t));
+}
+
 export function sentences(text: string): string[] {
   return text
     .split(/(?<=[.!?])\s+/)
@@ -25,6 +30,7 @@ export function sentences(text: string): string[] {
 
 export function countSyllables(word: string): number {
   const w = word.toLowerCase().replace(/[^a-z]/g, "");
+  if (w.length === 0) return 0;
   if (w.length <= 3) return 1;
   const groups = w.replace(/(?:[^laeiouy]es|ed|[^laeiouy]e)$/, "").match(/[aeiouy]{1,2}/g);
   return groups ? groups.length : 1;
