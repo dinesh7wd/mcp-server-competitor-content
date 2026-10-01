@@ -89,9 +89,10 @@ Pages are decoded using the BOM, then the `Content-Type` charset, then a `<meta 
 
 ## Security
 
-- Every hostname is resolved and all A/AAAA records must be public (private, loopback, CGNAT, link-local, documentation, benchmark, IPv6 ULA/site-local, and NAT64/6to4/IPv4-mapped forms of those are blocked; Teredo `2001::/32` addresses are not decoded to their embedded IPv4). The HTTP client connects only to the addresses it validated, so DNS rebinding cannot swap in a private IP between check and connect.
+- Every hostname is resolved and all A/AAAA records must be public (private, loopback, CGNAT, link-local, documentation, benchmark, 6to4 relay `192.88.99.0/24`, and NAT64/6to4/IPv4-mapped forms of those are blocked). IPv6 is an allow-list: only global unicast `2000::/3` passes, minus `2001::/23` (incl. Teredo), `2001:db8::/32` and `3fff::/20`. The HTTP client connects only to the addresses it validated, so DNS rebinding cannot swap in a private IP between check and connect.
 - Redirects use `redirect: "manual"` and are re-validated per hop.
-- Playwright blocks service workers and WebSockets, aborts requests to blocked destinations, and uses your configured `USER_AGENT`. Chromium does its own DNS resolution, so the headless path is not pinned the way the HTTP client is.
+- Headless (Playwright) renders are pinned too: Chromium is launched with its own DNS disabled, every request is intercepted and fetched by the same pinned client (redirects followed and re-checked in Node, max 150 requests per render; images, media and fonts skipped), then handed back to the browser. Service workers and WebSockets are blocked and your configured `USER_AGENT` is used.
+- robots.txt patterns are matched without regular expressions (linear time), and patterns are capped at 512 characters, so a hostile robots.txt cannot stall the server.
 - API keys are stripped from error messages and stderr logs (query strings redacted).
 - Response bodies are capped (`MAX_BODY_BYTES`, default 2MB); text capped (`MAX_TEXT_CHARS`).
 - `scrape_page` never returns raw HTML; `bodyText` is wrapped as untrusted content.

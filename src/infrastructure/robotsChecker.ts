@@ -24,22 +24,41 @@ export function productToken(userAgent: string): string {
   return (userAgent.split("/")[0] ?? "").trim().toLowerCase();
 }
 
-function pathMatches(pattern: string, path: string): boolean {
-  let regex = "^";
-  for (let i = 0; i < pattern.length; i += 1) {
-    const ch = pattern[i]!;
-    if (ch === "*") regex += ".*";
-    else if (ch === "$" && i === pattern.length - 1) regex += "$";
-    else if (/[.+?^${}()|[\]\\]/.test(ch)) regex += `\\${ch}`;
-    else regex += ch;
+/**
+ * Longer Disallow patterns are cut to a prefix (a broader, stricter match); longer Allow
+ * patterns are dropped. Keeps matching cost bounded without ever loosening a restriction.
+ */
+export const MAX_ROBOTS_PATTERN_LENGTH = 512;
+
+/**
+ * Matches a robots.txt path pattern (`*` wildcard, trailing `$` anchor) without regular
+ * expressions: literal segments are located left to right with indexOf, so the cost is
+ * linear in path + pattern length and hostile patterns cannot cause catastrophic backtracking.
+ */
+export function robotsPatternMatches(pattern: string, path: string): boolean {
+  const anchored = pattern.endsWith("$");
+  const segments = (anchored ? pattern.slice(0, -1) : pattern).split("*");
+  const first = segments[0]!;
+  if (!path.startsWith(first)) return false;
+  if (segments.length === 1) return !anchored || path.length === first.length;
+
+  let pos = first.length;
+  for (let i = 1; i < segments.length - 1; i += 1) {
+    const seg = segments[i]!;
+    if (!seg) continue;
+    const idx = path.indexOf(seg, pos);
+    if (idx === -1) return false;
+    pos = idx + seg.length;
   }
-  return new RegExp(regex).test(path);
+  const last = segments[segments.length - 1]!;
+  if (!anchored) return !last || path.indexOf(last, pos) !== -1;
+  return path.length - last.length >= pos && path.endsWith(last);
 }
 
 function longestMatch(patterns: readonly string[], path: string): number {
   let best = -1;
   for (const p of patterns) {
-    if (p !== "" && pathMatches(p, path)) best = Math.max(best, p.length);
+    if (p !== "" && robotsPatternMatches(p, path)) best = Math.max(best, p.length);
   }
   return best;
 }
@@ -65,9 +84,9 @@ export function parseRobotsTxt(text: string): RuleGroup[] {
       }
       current.agents.push(agent);
     } else if (current && key === "allow") {
-      current.allows.push(value);
+      if (value.length <= MAX_ROBOTS_PATTERN_LENGTH) current.allows.push(value);
     } else if (current && key === "disallow") {
-      current.disallows.push(value);
+      current.disallows.push(value.slice(0, MAX_ROBOTS_PATTERN_LENGTH));
     }
   }
   return groups;

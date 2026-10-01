@@ -19,8 +19,10 @@ import {
   __robotsTest,
   createRobotsChecker,
   isPathAllowed,
+  MAX_ROBOTS_PATTERN_LENGTH,
   parseRobotsTxt,
   productToken,
+  robotsPatternMatches,
   ROBOTS_MAX_BYTES,
   ROBOTS_UNREACHABLE_TTL_SECONDS,
 } from "../../../src/infrastructure/robotsChecker.js";
@@ -114,6 +116,40 @@ describe("robots parsing", () => {
     expect(__robotsTest.pathAllowed("/a/x", rules)).toBe(false);
     expect(__robotsTest.pathAllowed("/a/public", rules)).toBe(true);
     expect(__robotsTest.pathAllowed("", rules)).toBe(true);
+  });
+
+  it("glob matcher agrees with a regex reference on wildcard and anchor edge cases", () => {
+    const reference = (pattern: string, path: string): boolean => {
+      const anchored = pattern.endsWith("$");
+      const body = (anchored ? pattern.slice(0, -1) : pattern)
+        .split("*")
+        .map((p) => p.replace(/[.+?^${}()|[\]\\]/g, "\\$&"))
+        .join(".*");
+      return new RegExp(`^${body}${anchored ? "$" : ""}`).test(path);
+    };
+    const patterns = ["/", "/a", "/a$", "/*", "/*$", "/*.pdf$", "/a*b", "/a*b$", "/**b", "/a*a*a$", "*", "$", "/x*", "/fish*.php", "/$", "/a$b"];
+    const paths = ["/", "/a", "/ab", "/aab", "/ba", "/a/b/c.pdf", "/a.pdf?x", "/aaa", "/fish/salmon.php", "/fishheads.php?id=1", "/x", "/a$b", ""];
+    for (const pattern of patterns) {
+      for (const path of paths) {
+        expect(robotsPatternMatches(pattern, path), `${pattern} vs ${path}`).toBe(reference(pattern, path));
+      }
+    }
+  });
+
+  it("stays fast on hostile wildcard patterns (no catastrophic backtracking)", () => {
+    const hostile = `User-agent: *\n${Array.from({ length: 2000 }, () => `Disallow: /${"*a".repeat(50)}*b$`).join("\n")}`;
+    const groups = parseRobotsTxt(hostile);
+    const start = Date.now();
+    expect(isPathAllowed(groups, UA, `/${"a".repeat(2000)}`)).toBe(true);
+    expect(Date.now() - start).toBeLessThan(500);
+  });
+
+  it("caps pattern length without loosening restrictions", () => {
+    const long = `/${"x".repeat(MAX_ROBOTS_PATTERN_LENGTH + 100)}`;
+    const groups = parseRobotsTxt(`User-agent: *\nDisallow: ${long}$\nAllow: ${long}y\n`);
+    expect(groups[0]?.disallows).toEqual([long.slice(0, MAX_ROBOTS_PATTERN_LENGTH)]);
+    expect(groups[0]?.allows).toEqual([]);
+    expect(isPathAllowed(groups, UA, `${long}zzz`)).toBe(false);
   });
 
   it("allows everything when no group applies", () => {

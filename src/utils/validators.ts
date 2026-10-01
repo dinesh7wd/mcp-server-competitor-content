@@ -21,6 +21,7 @@ const IPV4_BLOCKED_SUBNETS: ReadonlyArray<readonly [string, number]> = [
   ["172.16.0.0", 12],
   ["192.0.0.0", 24],
   ["192.0.2.0", 24],
+  ["192.88.99.0", 24],
   ["192.168.0.0", 16],
   ["198.18.0.0", 15],
   ["198.51.100.0", 24],
@@ -31,6 +32,19 @@ const IPV4_BLOCKED_SUBNETS: ReadonlyArray<readonly [string, number]> = [
 
 const IPV4_BLOCKLIST = new net.BlockList();
 for (const [prefix, bits] of IPV4_BLOCKED_SUBNETS) IPV4_BLOCKLIST.addSubnet(prefix, bits, "ipv4");
+
+/**
+ * Reserved ranges inside global unicast 2000::/3 (everything outside 2000::/3 is blocked):
+ * 2001::/23 IETF protocol assignments incl. Teredo 2001::/32, documentation 2001:db8::/32 and 3fff::/20.
+ */
+const IPV6_BLOCKED_SUBNETS: ReadonlyArray<readonly [string, number]> = [
+  ["2001::", 23],
+  ["2001:db8::", 32],
+  ["3fff::", 20],
+];
+
+const IPV6_BLOCKLIST = new net.BlockList();
+for (const [prefix, bits] of IPV6_BLOCKED_SUBNETS) IPV6_BLOCKLIST.addSubnet(prefix, bits, "ipv6");
 
 /** Private, loopback, link-local, CGNAT, documentation, benchmark, multicast, reserved IPv4. */
 export function isBlockedIpv4(ip: string): boolean {
@@ -72,27 +86,22 @@ function embeddedIpv4(h: readonly number[]): string | null {
   if (zero(0, 5) && h[5] === 0xffff) return hextetsToIpv4(h[6]!, h[7]!);
   if (zero(0, 4) && h[4] === 0xffff && h[5] === 0) return hextetsToIpv4(h[6]!, h[7]!);
   if (zero(0, 6)) return hextetsToIpv4(h[6]!, h[7]!);
-  if (h[0] === 0x64 && h[1] === 0xff9b && (zero(2, 6) || h[2] === 1)) {
-    return hextetsToIpv4(h[6]!, h[7]!);
-  }
+  if (h[0] === 0x64 && h[1] === 0xff9b && zero(2, 6)) return hextetsToIpv4(h[6]!, h[7]!);
   if (h[0] === 0x2002) return hextetsToIpv4(h[1]!, h[2]!);
   return null;
 }
 
-/** Loopback, unspecified, ULA, link/site-local, multicast, documentation, and embedded private IPv4. */
+/**
+ * Allow-list: only public global unicast (2000::/3 minus reserved ranges) passes. Addresses that
+ * embed an IPv4 (mapped, compatible, NAT64, 6to4) are judged by that IPv4.
+ */
 export function isBlockedIpv6(ip: string): boolean {
   const h = parseIpv6(ip);
   if (!h) return true;
   const v4 = embeddedIpv4(h);
-  if (v4 !== null && isBlockedIpv4(v4)) return true;
-  const first = h[0]!;
-  if ((first & 0xfe00) === 0xfc00) return true;
-  if ((first & 0xffc0) === 0xfe80) return true;
-  if ((first & 0xffc0) === 0xfec0) return true;
-  if ((first & 0xff00) === 0xff00) return true;
-  if (first === 0x2001 && h[1] === 0x0db8) return true;
-  if (first === 0x0100 && h.slice(1, 4).every((x) => x === 0)) return true;
-  return false;
+  if (v4 !== null) return isBlockedIpv4(v4);
+  if ((h[0]! & 0xe000) !== 0x2000) return true;
+  return IPV6_BLOCKLIST.check(h.map((x) => x.toString(16)).join(":"), "ipv6");
 }
 
 export function isBlockedIp(address: string): boolean {

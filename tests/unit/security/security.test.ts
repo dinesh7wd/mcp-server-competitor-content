@@ -98,6 +98,25 @@ describe("SSRF validators", () => {
     expect(isBlockedIp("2606:4700:4700::1111")).toBe(false);
   });
 
+  it("matches web-audit's allow-list: only public 2000::/3, plus the 6to4 relay IPv4 range", () => {
+    for (const ip of [
+      "192.88.99.1",
+      "2001::1",
+      "2001:0:4136:e378:8000:63bf:3fff:fdd2",
+      "2001:2::1",
+      "2001:10::1",
+      "3fff::1",
+      "64:ff9b:1::808:808",
+      "4000::1",
+      "1234::1",
+    ]) {
+      expect(isBlockedIp(ip), ip).toBe(true);
+    }
+    for (const ip of ["2a00:1450:4001::200e", "2400:cb00::1", "2620:fe::fe"]) {
+      expect(isBlockedIp(ip), ip).toBe(false);
+    }
+  });
+
   it("parses IPv6 text forms strictly", () => {
     expect(parseIpv6("::1")).toEqual([0, 0, 0, 0, 0, 0, 0, 1]);
     expect(parseIpv6("[fe80::1%eth0]")?.[0]).toBe(0xfe80);

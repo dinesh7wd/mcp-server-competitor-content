@@ -113,7 +113,7 @@ function normalizeHeaders(headers: FetchResponseLike["headers"]): Record<string,
   return result;
 }
 
-async function readLimitedBody(
+export async function readLimitedBody(
   body: FetchResponseLike["body"],
   maxBytes: number,
   truncate: boolean,

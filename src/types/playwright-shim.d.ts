@@ -1,9 +1,18 @@
 /** Minimal ambient types so `tsc` succeeds when optional playwright is not installed. */
 declare module "playwright" {
+  export interface Request {
+    url(): string;
+    method(): string;
+    headers(): Record<string, string>;
+    postDataBuffer(): Buffer | null;
+    resourceType(): string;
+  }
+
   export interface Route {
-    request(): { url(): string };
-    abort(): Promise<void>;
+    request(): Request;
+    abort(errorCode?: string): Promise<void>;
     continue(): Promise<void>;
+    fulfill(response: { status?: number; headers?: Record<string, string>; body?: string | Buffer }): Promise<void>;
   }
 
   export interface WebSocketRoute {
@@ -45,6 +54,6 @@ declare module "playwright" {
   }
 
   export const chromium: {
-    launch(options?: { headless?: boolean }): Promise<Browser>;
+    launch(options?: { headless?: boolean; args?: readonly string[] }): Promise<Browser>;
   };
 }
